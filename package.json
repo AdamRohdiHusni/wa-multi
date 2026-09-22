@@ -1,0 +1,45 @@
+{
+  "name": "wa-multi",
+  "productName": "WA Multi",
+  "version": "1.0.0",
+  "description": "Multi-account WhatsApp Web desktop with account toggle",
+  "main": "main.js",
+  "author": "Suki",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --x64"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "id.mysuki.wamulti",
+    "productName": "WA Multi",
+    "icon": "build/icon.ico",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "app.js",
+      "app.css",
+      "README.md",
+      "build/icon.png"
+    ],
+    "win": {
+      "target": ["nsis"],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "WA Multi"
+    }
+  }
+}
