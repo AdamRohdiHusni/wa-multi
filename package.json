@@ -1,8 +1,8 @@
 {
   "name": "wa-multi",
   "productName": "WA Multi",
-  "version": "1.0.0",
-  "description": "Multi-account WhatsApp Web desktop with account toggle",
+  "version": "2.0.0",
+  "description": "Multi-account WhatsApp Web desktop: 2 live tabs + multi-account blast (personal & groups) with scheduling",
   "main": "main.js",
   "author": "Suki",
   "license": "MIT",
@@ -28,6 +28,7 @@
       "app.js",
       "app.css",
       "README.md",
+      "vendor/wppconnect-wa.js",
       "build/icon.png"
     ],
     "win": {

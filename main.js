@@ -1,6 +1,10 @@
-// WA Multi — Multi-account WhatsApp Web desktop shell
-// Design: 1 live account at a time (lazy-load), sessions persisted per account.
-const { app, BrowserWindow, WebContentsView, ipcMain, shell, nativeTheme, Menu } = require('electron')
+// WA Multi v2.0 — Multi-account WhatsApp Web desktop shell + multi-account blast
+// Architecture:
+//   • Accounts are opened as WebContentsView, assigned to 1 of 2 stage slots
+//   • Slot A = pinned personal account (always alive)  |  Slot B = office account
+//   • Blast runs by injecting the wppconnect/wa-js engine into a logged-in WA Web page
+//     (no second QR, no parallel session). Accounts are rotated ONE AT A TIME to keep RAM low.
+const { app, BrowserWindow, WebContentsView, ipcMain, shell, nativeTheme, Menu, Tray, Notification, dialog } = require('electron')
 const path = require('path')
 const fs = require('fs')
 
@@ -11,43 +15,56 @@ const userDataDir = IS_DEV
 const SESSIONS_DIR = path.join(userDataDir, 'sessions')
 const ACCOUNTS_FILE = path.join(userDataDir, 'accounts.json')
 const PREFS_FILE = path.join(userDataDir, 'prefs.json')
+const SCHEDULES_FILE = path.join(userDataDir, 'schedules.json')
+const HISTORY_FILE = path.join(userDataDir, 'history.json')
+const TMP_DIR = path.join(userDataDir, 'tmp')
 
 app.commandLine.appendSwitch('disable-gpu') // lightweight on weak laptops
 app.commandLine.appendSwitch('disable-software-rasterizer')
 app.commandLine.appendSwitch('disable-renderer-backgrounding')
-app.commandLine.appendSwitch('force_high_performance_gpu') // no-op when GPU off
+
+const CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+const WAJS_BUNDLE = fs.readFileSync(path.join(__dirname, 'vendor', 'wppconnect-wa.js'), 'utf8')
 
 function ensureDirs () {
-  for (const d of [userDataDir, SESSIONS_DIR]) fs.mkdirSync(d, { recursive: true })
+  for (const d of [userDataDir, SESSIONS_DIR, TMP_DIR]) fs.mkdirSync(d, { recursive: true })
 }
 ensureDirs()
 
-// ── Accounts store ────────────────────────────────────────────
-function loadAccounts () {
+// ── Stores ────────────────────────────────────────────────────
+function readJson (file, fallback) {
   try {
-    const raw = fs.readFileSync(ACCOUNTS_FILE, 'utf8')
-    const parsed = JSON.parse(raw)
-    if (Array.isArray(parsed)) return parsed
-  } catch (_) {}
-  return []
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+    return parsed
+  } catch (_) { return fallback }
 }
-function saveAccounts (list) {
-  fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(list, null, 2))
+function writeJson (file, data) {
+  try { fs.writeFileSync(file, JSON.stringify(data, null, 2)) } catch (_) {}
 }
 
-// ── Prefs (theme, last account) ───────────────────────────────
-function loadPrefs () {
-  try { return JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')) } catch (_) { return {} }
-}
-function savePrefs (p) {
-  fs.writeFileSync(PREFS_FILE, JSON.stringify(p, null, 2))
-}
+let accounts = readJson(ACCOUNTS_FILE, [])
+let prefs = readJson(PREFS_FILE, {})
+let schedules = readJson(SCHEDULES_FILE, [])
+let history = readJson(HISTORY_FILE, [])
+if (!Array.isArray(accounts)) accounts = []
+if (!Array.isArray(schedules)) schedules = []
+if (!Array.isArray(history)) history = []
 
-let accounts = loadAccounts()
-let prefs = loadPrefs()
+const saveAccounts = () => writeJson(ACCOUNTS_FILE, accounts)
+const savePrefs = () => writeJson(PREFS_FILE, prefs)
+const saveSchedules = () => writeJson(SCHEDULES_FILE, schedules)
+const saveHistory = () => writeJson(HISTORY_FILE, history)
+
+// prefs defaults
+if (!prefs.tabMode) prefs.tabMode = 'dual'   // 'dual' = pinned + 1 office | 'solo' = pinned only
+if (!prefs.theme) prefs.theme = 'dark'
+if (typeof prefs.dailyCap !== 'number') prefs.dailyCap = 40
+if (!prefs.pinnedId) prefs.pinnedId = null
 
 // ── Main window ───────────────────────────────────────────────
 let win = null
+let tray = null
+
 function createWindow () {
   win = new BrowserWindow({
     width: 1280,
@@ -68,135 +85,967 @@ function createWindow () {
   if (IS_DEV) win.webContents.openDevTools({ mode: 'detach' })
   attachResizeHandler()
 
-  // External links open in system browser, not inside the app
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/i.test(url)) shell.openExternal(url)
     return { action: 'deny' }
   })
+
+  // closing the window hides to tray when schedules are pending, else quits
+  win.on('close', (e) => {
+    const pending = schedules.some(s => s.status === 'pending')
+    if (pending && !app.isQuitting) {
+      e.preventDefault()
+      win.hide()
+      notifyTray('WA Multi masih jalan', 'Ada jadwal blast yang belum jalan. App disembunyikan ke tray.')
+    }
+  })
 }
+
+app.isQuitting = false
+app.on('before-quit', () => { app.isQuitting = true })
 
 app.whenReady().then(() => {
   createWindow()
+  buildTray()
+  startScheduleTicker()
   if (process.env.WA_MULTI_SELFTEST) runSelfTest()
 })
 
-// ── Self-test harness (dev only, enabled via WA_MULTI_SELFTEST=1) ──
+app.on('window-all-closed', () => app.quit())
+app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else win.show() })
+
+// ── Tray ──────────────────────────────────────────────────────
+function trayIconPath () {
+  const ico = path.join(__dirname, 'build', 'icon.ico')
+  const png = path.join(__dirname, 'build', 'icon.png')
+  if (process.platform === 'win32' && fs.existsSync(ico)) return ico
+  return fs.existsSync(png) ? png : ico
+}
+function buildTray () {
+  try {
+    tray = new Tray(trayIconPath())
+    tray.setToolTip('WA Multi')
+    tray.on('click', () => { if (win) { win.show(); win.focus() } })
+    refreshTrayMenu()
+  } catch (_) { tray = null }
+}
+function refreshTrayMenu () {
+  if (!tray) return
+  const pending = schedules.filter(s => s.status === 'pending')
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Buka WA Multi', click: () => { if (win) { win.show(); win.focus() } } },
+    { type: 'separator' },
+    { label: `Jadwal pending: ${pending.length}`, enabled: false },
+    { type: 'separator' },
+    { label: 'Keluar', click: () => { app.isQuitting = true; app.quit() } }
+  ]))
+}
+function notifyTray (title, body) {
+  try { new Notification({ title, body }).show() } catch (_) {}
+}
+
+// ── View registry & stage layout ──────────────────────────────
+// slot 'a' = left (or full width in solo mode) | slot 'b' = right (dual mode only)
+const views = new Map()        // accountId -> WebContentsView (alive)
+const slotOf = new Map()       // accountId -> 'a' | 'b'
+const engines = new Map()      // accountId -> { injected: bool, promise }
+let uiTop = 88
+let overlayOpen = false
+
+function stageRect () {
+  if (!win) return { x: 0, y: 0, width: 0, height: 0 }
+  const b = win.getContentBounds()
+  return { x: 0, y: uiTop, width: b.width, height: Math.max(1, b.height - uiTop) }
+}
+
+function viewBounds (accountId) {
+  if (!win) return { x: 0, y: 0, width: 0, height: 0 }
+  if (overlayOpen) return { x: 0, y: 0, width: 0, height: 0 }
+  const r = stageRect()
+  const slot = slotOf.get(accountId)
+  if (!slot) return { x: 0, y: 0, width: 0, height: 0 } // parked (alive but not on stage)
+  const dual = prefs.tabMode === 'dual' && slotOf.size > 0 && hasSlot('b')
+  if (slot === 'b' || (dual && slot === 'a')) {
+    const half = Math.floor(r.width / 2)
+    return slot === 'a'
+      ? { x: 0, y: r.y, width: half, height: r.height }
+      : { x: half, y: r.y, width: r.width - half, height: r.height }
+  }
+  return { x: 0, y: r.y, width: r.width, height: r.height }
+}
+
+function hasSlot (slot) {
+  for (const s of slotOf.values()) if (s === slot) return true
+  return false
+}
+
+function layoutViews () {
+  for (const [id, v] of views) {
+    try { v.setBounds(viewBounds(id)) } catch (_) {}
+  }
+}
+
+// ── Account engine runtime ────────────────────────────────────
+function createView (accountId) {
+  const view = new WebContentsView({
+    webPreferences: {
+      partition: 'persist:wa-' + accountId,
+      contextIsolation: true,
+      nodeIntegration: false,
+      spellcheck: false
+    }
+  })
+  view.webContents.session.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details, cb) => {
+    const u = details.url
+    if (/google-analytics|googletagmanager|doubleclick|facebook\.net|scorecardresearch|quantserve/i.test(u)) {
+      return cb({ cancel: true })
+    }
+    cb({ cancel: false })
+  })
+  // WA Web blocks the Electron UA ("works with Chrome 100+" page) → spoof standard Chrome
+  view.webContents.setUserAgent(CHROME_UA)
+  view.webContents.loadURL('https://web.whatsapp.com', { userAgent: CHROME_UA })
+  view.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) shell.openExternal(url)
+    return { action: 'deny' }
+  })
+  views.set(accountId, view)
+  win.contentView.addChildView(view)
+  view.setBounds(viewBounds(accountId))
+  return view
+}
+
+function destroyView (accountId) {
+  const view = views.get(accountId)
+  if (!view) return
+  try { win.contentView.removeChildView(view) } catch (_) {}
+  try { view.webContents.close() } catch (_) {}
+  views.delete(accountId)
+  slotOf.delete(accountId)
+  engines.delete(accountId)
+}
+
+// Assign an account to a stage slot and make sure a view exists for it
+function showInSlot (accountId, slot) {
+  const acc = accounts.find(a => a.id === accountId)
+  if (!acc) return { ok: false, error: 'akun tidak ada' }
+  // free the target slot from whoever holds it
+  for (const [id, s] of [...slotOf]) {
+    if (s === slot && id !== accountId) {
+      const other = accounts.find(a => a.id === id)
+      const isPinned = prefs.pinnedId === id
+      if (slot === 'a' && isPinned) return { ok: false, error: 'slot pribadi dikunci' }
+      if (isPinned) { // pinned account can never leave slot a
+        continue
+      }
+      slotOf.delete(id)
+      // park it: destroy the view so we don't pay RAM for a hidden account
+      destroyView(id)
+      if (other) other.lastOpened = Date.now()
+    }
+  }
+  if (!views.has(accountId)) createView(accountId)
+  slotOf.set(accountId, slot)
+  acc.lastOpened = Date.now()
+  saveAccounts()
+  layoutViews()
+  notifyStateChanged()
+  return { ok: true, slot }
+}
+
+function openAccount (accountId) {
+  const isPinned = prefs.pinnedId === accountId
+  if (isPinned) return showInSlot(accountId, 'a')
+  if (prefs.tabMode === 'solo') return showInSlot(accountId, 'a')
+  // dual mode: office account goes to slot b (or a if pinned slot is empty/free)
+  return showInSlot(accountId, 'b')
+}
+
+function parkAccount (accountId) {
+  if (prefs.pinnedId === accountId) return { ok: false, error: 'akun pribadi gak bisa diparkir' }
+  destroyView(accountId)
+  notifyStateChanged()
+  return { ok: true }
+}
+
+// ── Engine injection ──────────────────────────────────────────
+async function ensureEngine (view, timeoutMs = 60000) {
+  const wc = view.webContents
+  const already = await wc.executeJavaScript('!!(window.WPP && window.WPP.isInjected)').catch(() => false)
+  if (already) return { ok: true, injected: false }
+
+  // wait for WA Web's webpack runtime to boot
+  const t0 = Date.now()
+  while (Date.now() - t0 < timeoutMs) {
+    const ready = await wc.executeJavaScript('!!(window.webpackChunkwhatsapp_webpack_modules || window.require)').catch(() => false)
+    if (ready) break
+    await wait(1000)
+  }
+  await wc.executeJavaScript(WAJS_BUNDLE).catch(() => {})
+  await wait(2500)
+  const ok = await wc.executeJavaScript('!!(window.WPP && window.WPP.isInjected)').catch(() => false)
+  return { ok, injected: true }
+}
+
+async function isAuthenticated (view) {
+  return view.webContents.executeJavaScript('(window.WPP && window.WPP.conn && typeof window.WPP.conn.isAuthenticated === "function") ? !!window.WPP.conn.isAuthenticated() : false').catch(() => false)
+}
+
+async function waitAuthenticated (view, timeoutMs = 90000) {
+  const t0 = Date.now()
+  while (Date.now() - t0 < timeoutMs) {
+    if (await isAuthenticated(view)) return true
+    await wait(1500)
+  }
+  return false
+}
+
+// Normalize an Indonesian phone number to international form (62xxx)
+function normalizePhone (phone) {
+  let d = String(phone || '').replace(/[^0-9]/g, '')
+  if (!d) return null
+  if (d.startsWith('0')) d = '62' + d.slice(1)            // 08xx -> 628xx
+  else if (d.startsWith('8') && d.length <= 13) d = '62' + d
+  if (d.length < 8) return null
+  return d
+}
+
+// Normalize a phone number to a WhatsApp JID
+function toJid (phone) {
+  const d = normalizePhone(phone)
+  return d ? d + '@c.us' : null
+}
+
+async function fetchContacts (view) {
+  await ensureEngine(view)
+  const raw = await view.webContents.executeJavaScript(`(async () => {
+    try {
+      const list = await window.WPP.contact.list({ onlyMyContacts: true })
+      return (list || []).map(c => ({
+        id: (c.id && (c.id._serialized || c.id.user)) || null,
+        name: c.name || c.pushname || c.shortName || c.formattedName || '',
+        isMe: !!(c.isMe)
+      })).filter(c => c.id && !c.isMe)
+    } catch (e) { return { __err: String(e).slice(0,200) } }
+  })()`).catch(e => ({ __err: String(e).slice(0, 200) }))
+  if (raw && raw.__err) return { ok: false, error: raw.__err }
+  return { ok: true, contacts: raw || [] }
+}
+
+async function fetchGroups (view) {
+  await ensureEngine(view)
+  const raw = await view.webContents.executeJavaScript(`(async () => {
+    try {
+      const list = await window.WPP.group.getAllGroups()
+      return (list || []).map(g => ({
+        id: (g.id && (g.id._serialized || g.id.user)) || null,
+        name: g.name || g.formattedTitle || ''
+      })).filter(g => g.id)
+    } catch (e) { return { __err: String(e).slice(0,200) } }
+  })()`).catch(e => ({ __err: String(e).slice(0, 200) }))
+  if (raw && raw.__err) return { ok: false, error: raw.__err }
+  return { ok: true, groups: raw || [] }
+}
+
+async function groupFromInvite (view, link) {
+  await ensureEngine(view)
+  const code = String(link || '').replace(/^.*chat\.whatsapp\.com\//i, '').replace(/[^A-Za-z0-9]/g, '')
+  if (!code) return { ok: false, error: 'link undangan tidak valid' }
+  const raw = await view.webContents.executeJavaScript(`(async () => {
+    try {
+      const info = await window.WPP.group.getGroupInfoFromInviteCode(${JSON.stringify(code)})
+      const g = info && (info.groupMetadata || info)
+      const id = g && g.id && (g.id._serialized || g.id.user)
+      return { id: id || null, name: (g && (g.name || g.subject)) || '' }
+    } catch (e) { return { __err: String(e).slice(0,200) } }
+  })()`).catch(e => ({ __err: String(e).slice(0, 200) }))
+  if (raw && raw.__err) return { ok: false, error: raw.__err }
+  if (!raw || !raw.id) return { ok: false, error: 'grup tidak ketemu' }
+  return { ok: true, group: raw }
+}
+
+async function sendText (view, jid, text) {
+  const res = await view.webContents.executeJavaScript(`(async () => {
+    try {
+      await window.WPP.chat.sendTextMessage(${JSON.stringify(jid)}, ${JSON.stringify(text)}, { createChat: true, waitForAck: false })
+      return { ok: true }
+    } catch (e) { return { ok: false, error: String(e && e.message || e).slice(0,200) } }
+  })()`).catch(e => ({ ok: false, error: String(e).slice(0, 200) }))
+  return res || { ok: false, error: 'unknown' }
+}
+
+async function sendFile (view, jid, file, caption) {
+  const res = await view.webContents.executeJavaScript(`(async () => {
+    try {
+      const opts = { createChat: true, waitForAck: false, type: 'auto-detect', filename: ${JSON.stringify(file.filename || 'file')} }
+      if (${JSON.stringify(caption || '')}) opts.caption = ${JSON.stringify(caption || '')}
+      await window.WPP.chat.sendFileMessage(${JSON.stringify(jid)}, ${JSON.stringify(file.dataUrl)}, opts)
+      return { ok: true }
+    } catch (e) { return { ok: false, error: String(e && e.message || e).slice(0,200) } }
+  })()`).catch(e => ({ ok: false, error: String(e).slice(0, 200) }))
+  return res || { ok: false, error: 'unknown' }
+}
+
+const wait = (ms) => new Promise(r => setTimeout(r, ms))
+
+// ── Daily send counters (per account) ─────────────────────────
+function todayKey () { return new Date().toISOString().slice(0, 10) }
+function sentToday (accountId) {
+  const d = todayKey()
+  return history.filter(h => h.date === d && h.accountId === accountId && h.status === 'sent').length
+}
+
+// ── Blast job runner ──────────────────────────────────────────
+let activeJob = null
+let jobSeq = 0
+
+function emitProgress (payload) {
+  try { win.webContents.send('wa-multi:blastProgress', payload) } catch (_) {}
+}
+
+// Acquire a ready-to-send view for an account: reuse a live view if present,
+// otherwise spin up a temporary one (and tear it down afterwards).
+async function acquireWorker (accountId) {
+  const existing = views.get(accountId)
+  const temp = !existing
+  const view = existing || createView(accountId)
+  if (temp) { slotOf.delete(accountId); view.setBounds({ x: 0, y: 0, width: 0, height: 0 }) }
+  const auth = await waitAuthenticated(view, 90000)
+  if (!auth) {
+    if (temp) destroyView(accountId)
+    return { ok: false, error: 'akun belum login / belum siap', temp }
+  }
+  const eng = await ensureEngine(view)
+  if (!eng.ok) {
+    if (temp) destroyView(accountId)
+    return { ok: false, error: 'gagal inject mesin blast', temp }
+  }
+  return { ok: true, view, temp }
+}
+function releaseWorker (accountId, temp) {
+  if (temp) destroyView(accountId)
+}
+
+// Round-robin split: every target handled by exactly one account
+function splitTargets (targets, accountIds) {
+  const buckets = new Map(accountIds.map(id => [id, []]))
+  targets.forEach((t, i) => buckets.get(accountIds[i % accountIds.length]).push(t))
+  return buckets
+}
+
+async function runBlastJob (job) {
+  const startedAt = Date.now()
+  const accountIds = job.accounts.filter(id => accounts.some(a => a.id === id))
+  if (!accountIds.length) { finishJob(job, 'failed', 'tidak ada akun terpilih'); return }
+  if (!job.targets.length) { finishJob(job, 'failed', 'tidak ada target'); return }
+
+  const buckets = job.mode === 'all'
+    ? new Map(accountIds.map(id => [id, job.targets.slice()]))
+    : splitTargets(job.targets, accountIds)
+
+  emitProgress({
+    phase: 'start', jobId: job.id, kind: job.kind, total: job.targets.length,
+    accounts: accountIds.map(id => {
+      const a = accounts.find(x => x.id === id)
+      return { id, name: a ? a.name : id, total: buckets.get(id).length, sent: 0, failed: 0, status: 'nunggu' }
+    })
+  })
+
+  for (const accountId of accountIds) {
+    if (activeJob !== job || job.stopAll) break
+    const acc = accounts.find(a => a.id === accountId)
+    const accName = acc ? acc.name : accountId
+    const slice = buckets.get(accountId)
+
+    emitProgress({ phase: 'accountStart', jobId: job.id, accountId, name: accName, total: slice.length })
+
+    const w = await acquireWorker(accountId)
+    if (!w.ok) {
+      emitProgress({ phase: 'accountError', jobId: job.id, accountId, name: accName, error: w.error })
+      slice.forEach(t => recordHistory(job, accountId, accName, t, 'failed', w.error))
+      emitProgress({ phase: 'accountDone', jobId: job.id, accountId, name: accName, sent: 0, failed: slice.length, status: 'gagal: ' + w.error })
+      continue
+    }
+
+    let sent = 0, failed = 0
+    for (let i = 0; i < slice.length; i++) {
+      if (activeJob !== job || job.stopAll || job.stopped.has(accountId)) break
+      const t = slice[i]
+
+      // daily cap guard — skip remaining targets if the account hit its limit
+      if (prefs.dailyCap > 0 && sentToday(accountId) >= prefs.dailyCap) {
+        emitProgress({ phase: 'accountError', jobId: job.id, accountId, name: accName, error: `batas harian ${prefs.dailyCap} pesan tercapai` })
+        break
+      }
+
+      const jid = job.kind === 'group' ? t.jid : (t.jid || toJid(t.phone))
+      let res
+      if (!jid) res = { ok: false, error: 'nomor tidak valid' }
+      else if (job.media) res = await sendFile(w.view, jid, job.media, job.message)
+      else res = await sendText(w.view, jid, job.message)
+
+      if (res.ok) {
+        sent++
+        recordHistory(job, accountId, accName, t, 'sent', null)
+      } else {
+        failed++
+        recordHistory(job, accountId, accName, t, 'failed', res.error)
+      }
+      emitProgress({
+        phase: 'progress', jobId: job.id, accountId, name: accName,
+        index: i + 1, total: slice.length, target: t.name || t.phone || t.jid,
+        status: res.ok ? 'sent' : 'failed', error: res.error || null, sent, failed
+      })
+
+      if (i < slice.length - 1 && !job.stopAll && !job.stopped.has(accountId)) {
+        await wait(Math.max(5, job.delaySec || 30) * 1000)
+      }
+    }
+
+    releaseWorker(accountId, w.temp)
+    emitProgress({ phase: 'accountDone', jobId: job.id, accountId, name: accName, sent, failed, status: 'selesai' })
+  }
+
+  const status = job.stopAll ? 'stopped' : 'done'
+  finishJob(job, status, null, startedAt)
+}
+
+function recordHistory (job, accountId, accName, target, status, error) {
+  history.push({
+    date: todayKey(),
+    ts: Date.now(),
+    jobId: job.id,
+    kind: job.kind,
+    accountId,
+    accountName: accName,
+    target: target.name || target.phone || target.jid,
+    jid: target.jid || toJid(target.phone) || null,
+    status,
+    error: error || null
+  })
+  if (history.length > 20000) history = history.slice(-15000)
+  saveHistory()
+}
+
+function finishJob (job, status, error, startedAt) {
+  job.status = status
+  job.finishedAt = Date.now()
+  job.error = error || null
+  if (job.scheduleId) {
+    const s = schedules.find(x => x.id === job.scheduleId)
+    if (s) { s.status = status === 'done' ? 'done' : (status === 'failed' ? 'failed' : 'cancelled'); s.ranAt = Date.now(); saveSchedules(); refreshTrayMenu() }
+  }
+  const totalSent = history.filter(h => h.jobId === job.id && h.status === 'sent').length
+  const totalFailed = history.filter(h => h.jobId === job.id && h.status === 'failed').length
+  emitProgress({ phase: 'done', jobId: job.id, status, error: error || null, sent: totalSent, failed: totalFailed, elapsedMs: startedAt ? Date.now() - startedAt : null })
+  notifyTray('Blast selesai', `${job.label || job.kind}: ${totalSent} terkirim, ${totalFailed} gagal`)
+  if (activeJob === job) activeJob = null
+}
+
+// ── Schedule ticker ───────────────────────────────────────────
+const SKIP_GRACE_MS = 5 * 60 * 1000 // if we're more than 5 min late, the laptop was off → skip
+function startScheduleTicker () {
+  setInterval(() => {
+    const now = Date.now()
+    for (const s of schedules) {
+      if (s.status !== 'pending') continue
+      if (s.when > now) continue
+      if (now - s.when > SKIP_GRACE_MS) {
+        s.status = 'skipped'
+        s.note = 'laptop mati / app gak jalan pas waktunya'
+        saveSchedules(); refreshTrayMenu()
+        emitProgress({ phase: 'scheduleSkipped', scheduleId: s.id, label: s.label })
+        continue
+      }
+      if (activeJob) continue // wait for the running job to finish
+      s.status = 'running'
+      saveSchedules(); refreshTrayMenu()
+      startBlastFromSchedule(s)
+    }
+  }, 30000)
+}
+
+function startBlastFromSchedule (s) {
+  const job = {
+    id: 'job-' + (++jobSeq) + '-' + Date.now().toString(36),
+    scheduleId: s.id,
+    label: s.label,
+    kind: s.kind,
+    targets: s.targets,
+    message: s.message,
+    media: s.media || null,
+    accounts: s.accounts,
+    delaySec: s.delaySec,
+    mode: s.mode,
+    stopAll: false,
+    stopped: new Set(),
+    status: 'running'
+  }
+  activeJob = job
+  runBlastJob(job).catch(e => finishJob(job, 'failed', String(e).slice(0, 200)))
+}
+
+// ── IPC ───────────────────────────────────────────────────────
+function notifyStateChanged () {
+  try { win.webContents.send('wa-multi:stateChanged') } catch (_) {}
+}
+
+ipcMain.handle('wa-multi:getState', () => ({
+  accounts: accounts.map(a => ({
+    id: a.id, name: a.name, color: a.color || null,
+    lastOpened: a.lastOpened || null,
+    isPinned: prefs.pinnedId === a.id,
+    slot: slotOf.get(a.id) || null,
+    alive: views.has(a.id),
+    sentToday: sentToday(a.id)
+  })),
+  pinnedId: prefs.pinnedId,
+  tabMode: prefs.tabMode,
+  dailyCap: prefs.dailyCap,
+  theme: prefs.theme,
+  schedules: schedules.map(s => ({
+    id: s.id, label: s.label, kind: s.kind, when: s.when, status: s.status,
+    accountIds: s.accounts, targetCount: s.targets.length, note: s.note || null
+  })),
+  blasting: !!activeJob,
+  history: history.slice(-50).reverse()
+}))
+
+ipcMain.handle('wa-multi:addAccount', (e, name) => {
+  const id = 'acc-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+  const palette = ['#25d366', '#34b7f1', '#f15f6d', '#f2a33c', '#a78bfa', '#2dd4bf']
+  const color = palette[accounts.length % palette.length]
+  accounts.push({ id, name: String(name || ('Akun ' + (accounts.length + 1))).trim(), color })
+  saveAccounts()
+  notifyStateChanged()
+  return { ok: true, id }
+})
+
+ipcMain.handle('wa-multi:renameAccount', (e, { id, name }) => {
+  const a = accounts.find(x => x.id === id)
+  if (a && name) { a.name = String(name).trim(); saveAccounts(); notifyStateChanged() }
+  return { ok: true }
+})
+
+ipcMain.handle('wa-multi:removeAccount', (e, id) => {
+  destroyView(id)
+  accounts = accounts.filter(a => a.id !== id)
+  if (prefs.pinnedId === id) prefs.pinnedId = null
+  saveAccounts(); savePrefs()
+  try { fs.rmSync(path.join(SESSIONS_DIR, id), { recursive: true, force: true }) } catch (_) {}
+  try { fs.rmSync(path.join(app.getPath('userData'), 'Partitions', 'wa-' + id), { recursive: true, force: true }) } catch (_) {}
+  notifyStateChanged()
+  return { ok: true }
+})
+
+ipcMain.handle('wa-multi:openAccount', (e, id) => openAccount(id))
+ipcMain.handle('wa-multi:parkAccount', (e, id) => parkAccount(id))
+
+ipcMain.handle('wa-multi:setPinned', (e, id) => {
+  const a = accounts.find(x => x.id === id)
+  if (!a) return { ok: false, error: 'akun tidak ada' }
+  prefs.pinnedId = id
+  savePrefs()
+  // pinned account takes slot a; whoever held it moves to b (dual) or parks (solo)
+  showInSlot(id, 'a')
+  notifyStateChanged()
+  return { ok: true }
+})
+
+ipcMain.handle('wa-multi:setTabMode', (e, mode) => {
+  prefs.tabMode = mode === 'solo' ? 'solo' : 'dual'
+  savePrefs()
+  if (prefs.tabMode === 'solo') {
+    // park everything except the pinned account
+    for (const id of [...views.keys()]) {
+      if (id !== prefs.pinnedId) destroyView(id)
+    }
+  }
+  layoutViews()
+  notifyStateChanged()
+  return { ok: true, tabMode: prefs.tabMode }
+})
+
+ipcMain.handle('wa-multi:setTheme', (e, theme) => {
+  prefs.theme = theme === 'light' ? 'light' : 'dark'
+  savePrefs()
+  nativeTheme.themeSource = prefs.theme
+  notifyStateChanged()
+  return { ok: true, theme: prefs.theme }
+})
+
+ipcMain.handle('wa-multi:setDailyCap', (e, cap) => {
+  prefs.dailyCap = Math.max(0, Number(cap) || 0)
+  savePrefs(); notifyStateChanged()
+  return { ok: true, dailyCap: prefs.dailyCap }
+})
+
+ipcMain.handle('wa-multi:setUITop', (e, top) => {
+  uiTop = Number(top) || 88
+  layoutViews()
+  return { ok: true }
+})
+
+ipcMain.handle('wa-multi:setOverlayOpen', (e, open) => {
+  overlayOpen = !!open
+  layoutViews()
+  return { ok: true }
+})
+
+// ── file pickers (CSV contacts + media) ───────────────────────
+ipcMain.handle('wa-multi:pickCsv', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Pilih file kontak (CSV)',
+    filters: [{ name: 'CSV', extensions: ['csv', 'txt'] }],
+    properties: ['openFile']
+  })
+  if (res.canceled || !res.filePaths.length) return { ok: false, canceled: true }
+  const file = res.filePaths[0]
+  let text = ''
+  try { text = fs.readFileSync(file, 'utf8') } catch (e) { return { ok: false, error: 'gagal baca file' } }
+  const rows = parseCsv(text)
+  if (!rows.length) return { ok: false, error: 'file kosong / format gak kebaca' }
+  return { ok: true, file: path.basename(file), rows, headers: Object.keys(rows[0]) }
+})
+
+ipcMain.handle('wa-multi:pickMedia', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Pilih gambar / file',
+    filters: [{ name: 'Gambar & Dokumen', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'pdf', 'mp4', 'docx', 'xlsx'] }],
+    properties: ['openFile']
+  })
+  if (res.canceled || !res.filePaths.length) return { ok: false, canceled: true }
+  const file = res.filePaths[0]
+  const buf = fs.readFileSync(file)
+  const ext = path.extname(file).slice(1).toLowerCase()
+  const mime = MIME[ext] || 'application/octet-stream'
+  return {
+    ok: true,
+    media: {
+      filename: path.basename(file),
+      mimetype: mime,
+      size: buf.length,
+      dataUrl: `data:${mime};base64,${buf.toString('base64')}`
+    }
+  }
+})
+
+const MIME = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif',
+  pdf: 'application/pdf', mp4: 'video/mp4', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+}
+
+// Minimal robust CSV parser (handles quotes, commas, semicolons, CRLF)
+function parseCsv (text) {
+  const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(l => l.trim())
+  if (!lines.length) return []
+  const delim = (lines[0].match(/;/g) || []).length > (lines[0].match(/,/g) || []).length ? ';' : ','
+  const splitLine = (line) => {
+    const out = []; let cur = ''; let q = false
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]
+      if (q) {
+        if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++ }
+        else if (ch === '"') q = false
+        else cur += ch
+      } else if (ch === '"') q = true
+      else if (ch === delim) { out.push(cur.trim()); cur = '' }
+      else cur += ch
+    }
+    out.push(cur.trim())
+    return out
+  }
+  const header = splitLine(lines[0]).map(h => h.toLowerCase())
+  const hasHeader = header.some(h => /nama|name|phone|nomor|no_?hp|telepon|whatsapp|wa/.test(h))
+  const idxPhone = hasHeader ? header.findIndex(h => /phone|nomor|no_?hp|telepon|whatsapp|wa|hp/.test(h)) : -1
+  const idxName = hasHeader ? header.findIndex(h => /nama|name|kreator|creator/.test(h)) : -1
+  const body = hasHeader ? lines.slice(1) : lines
+  const rows = []
+  for (const line of body) {
+    const cells = splitLine(line)
+    let phone = idxPhone >= 0 ? cells[idxPhone] : cells.find(c => /[0-9]{8,}/.test(c.replace(/[^0-9]/g, '')))
+    let name = idxName >= 0 ? cells[idxName] : (cells.find(c => c !== phone) || '')
+    if (!phone) continue
+    const digits = normalizePhone(phone)
+    if (!digits) continue
+    rows.push({ name: String(name || '').trim() || digits, phone: digits })
+  }
+  return rows
+}
+
+ipcMain.handle('wa-multi:fetchContacts', async (e, accountId) => {
+  const w = await acquireWorker(accountId)
+  if (!w.ok) return { ok: false, error: w.error }
+  const r = await fetchContacts(w.view)
+  releaseWorker(accountId, w.temp)
+  return r
+})
+
+ipcMain.handle('wa-multi:fetchGroups', async (e, accountId) => {
+  const w = await acquireWorker(accountId)
+  if (!w.ok) return { ok: false, error: w.error }
+  const r = await fetchGroups(w.view)
+  releaseWorker(accountId, w.temp)
+  return r
+})
+
+ipcMain.handle('wa-multi:groupFromInvite', async (e, { accountId, link }) => {
+  const w = await acquireWorker(accountId)
+  if (!w.ok) return { ok: false, error: w.error }
+  const r = await groupFromInvite(w.view, link)
+  releaseWorker(accountId, w.temp)
+  return r
+})
+
+// ── blast start / stop ────────────────────────────────────────
+ipcMain.handle('wa-multi:startBlast', async (e, cfg) => {
+  if (activeJob) return { ok: false, error: 'masih ada blast yang jalan' }
+  const targets = (cfg.targets || []).map(t => ({
+    jid: t.jid || null,
+    phone: t.phone || null,
+    name: t.name || t.phone || t.jid || ''
+  })).filter(t => t.jid || t.phone)
+  if (!targets.length) return { ok: false, error: 'target kosong' }
+  if (!cfg.accounts || !cfg.accounts.length) return { ok: false, error: 'pilih minimal 1 akun' }
+  if (!cfg.message && !cfg.media) return { ok: false, error: 'pesan / media kosong' }
+
+  const job = {
+    id: 'job-' + (++jobSeq) + '-' + Date.now().toString(36),
+    label: cfg.label || (cfg.kind === 'group' ? 'Blast Grup' : 'Blast Personal'),
+    kind: cfg.kind === 'group' ? 'group' : 'personal',
+    targets,
+    message: String(cfg.message || ''),
+    media: cfg.media || null,
+    accounts: cfg.accounts,
+    delaySec: Math.max(5, Number(cfg.delaySec) || 30),
+    mode: cfg.mode === 'all' ? 'all' : 'split',
+    stopAll: false,
+    stopped: new Set(),
+    status: 'running'
+  }
+  activeJob = job
+  runBlastJob(job).catch(e => finishJob(job, 'failed', String(e).slice(0, 200)))
+  return { ok: true, jobId: job.id }
+})
+
+ipcMain.handle('wa-multi:stopBlast', (e, accountId) => {
+  if (!activeJob) return { ok: false, error: 'gak ada blast jalan' }
+  if (accountId) activeJob.stopped.add(accountId)
+  else activeJob.stopAll = true
+  return { ok: true }
+})
+
+// ── schedules ─────────────────────────────────────────────────
+ipcMain.handle('wa-multi:addSchedule', (e, cfg) => {
+  const when = Number(cfg.when)
+  if (!when || when < Date.now() - 60000) return { ok: false, error: 'waktu jadwal tidak valid' }
+  const s = {
+    id: 'sch-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    label: cfg.label || (cfg.kind === 'group' ? 'Blast Grup' : 'Blast Personal'),
+    kind: cfg.kind === 'group' ? 'group' : 'personal',
+    when,
+    targets: (cfg.targets || []).map(t => ({ jid: t.jid || null, phone: t.phone || null, name: t.name || t.phone || t.jid || '' })).filter(t => t.jid || t.phone),
+    message: String(cfg.message || ''),
+    media: cfg.media || null,
+    accounts: cfg.accounts || [],
+    delaySec: Math.max(5, Number(cfg.delaySec) || 30),
+    mode: cfg.mode === 'all' ? 'all' : 'split',
+    status: 'pending',
+    createdAt: Date.now()
+  }
+  if (!s.targets.length) return { ok: false, error: 'target kosong' }
+  if (!s.accounts.length) return { ok: false, error: 'pilih minimal 1 akun' }
+  schedules.push(s)
+  saveSchedules(); refreshTrayMenu(); notifyStateChanged()
+  return { ok: true, id: s.id }
+})
+
+ipcMain.handle('wa-multi:cancelSchedule', (e, id) => {
+  const s = schedules.find(x => x.id === id)
+  if (s && s.status === 'pending') { s.status = 'cancelled'; saveSchedules(); refreshTrayMenu(); notifyStateChanged() }
+  return { ok: true }
+})
+
+ipcMain.handle('wa-multi:deleteSchedule', (e, id) => {
+  schedules = schedules.filter(x => x.id !== id)
+  saveSchedules(); refreshTrayMenu(); notifyStateChanged()
+  return { ok: true }
+})
+
+ipcMain.handle('wa-multi:clearHistory', () => {
+  history = []
+  saveHistory(); notifyStateChanged()
+  return { ok: true }
+})
+
+// ── resize handling ───────────────────────────────────────────
+function attachResizeHandler () {
+  if (!win) return
+  win.removeAllListeners('resize')
+  win.on('resize', () => layoutViews())
+  win.on('maximize', () => layoutViews())
+  win.on('unmaximize', () => layoutViews())
+  win.on('enter-full-screen', () => layoutViews())
+  win.on('leave-full-screen', () => layoutViews())
+}
+
+// self-heal bounds + forward unread badge from the pinned/live view title
+setInterval(() => {
+  if (!win || win.isDestroyed()) return
+  layoutViews()
+  for (const [id, view] of views) {
+    if (!view.webContents || view.webContents.isDestroyed()) continue
+    const title = view.webContents.getTitle()
+    if (!title) continue
+    const m = title.match(/^\((\d+)\)/)
+    win.webContents.send('wa-multi:unread', { accountId: id, unread: m ? parseInt(m[1], 10) : 0 })
+  }
+}, 4000)
+
+// ── Self-test harness ─────────────────────────────────────────
 function runSelfTest () {
   const results = []
-  const check = (name, cond, extra) => {
-    results.push(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? '  ' + extra : ''}`)
-  }
-  const wait = (ms) => new Promise(r => setTimeout(r, ms))
+  const check = (name, cond, extra) => results.push(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? '  ' + extra : ''}`)
 
   win.webContents.once('did-finish-load', async () => {
     try {
       await wait(400)
-      // 1. renderer boots & preload bridge exposed
-      const bridged = await win.webContents.executeJavaScript('typeof window.waMulti === "object"')
-      check('preload bridge exposed', bridged === true)
+      const js = (code) => win.webContents.executeJavaScript(code)
 
-      // 2. topbar rendered with dark theme default
-      const theme = await win.webContents.executeJavaScript('document.documentElement.getAttribute("data-theme")')
-      check('default theme is dark', theme === 'dark', `got=${theme}`)
+      // 1. bridge + theme
+      check('preload bridge exposed', (await js('typeof window.waMulti === "object"')) === true)
+      check('default theme is dark', (await js('document.documentElement.getAttribute("data-theme")')) === 'dark')
 
-      // 3. empty state -> welcome visible
-      const welcomeShown = await win.webContents.executeJavaScript('!document.getElementById("welcome").classList.contains("hidden")')
-      check('welcome screen visible when no accounts', welcomeShown === true)
+      // 2. views / tabs
+      check('tab bar rendered', (await js('!!document.getElementById("tabbar")')) === true)
+      const addA = await js('window.waMulti.addAccount("Pribadi")')
+      const addB = await js('window.waMulti.addAccount("Sweety 1")')
+      check('addAccount returns id', !!(addA && addA.id) && !!(addB && addB.id))
+      check('accounts persisted', JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8')).length === 2)
 
-      // 4. add account through the real IPC path
-      const addRes = await win.webContents.executeJavaScript('window.waMulti.addAccount("SelfTest 1")')
-      check('addAccount returns id', !!(addRes && addRes.id), JSON.stringify(addRes))
+      // 3. pin
+      await js(`window.waMulti.setPinned("${addA.id}")`)
+      let st = await js('window.waMulti.getState()')
+      check('pinned account flagged', st.pinnedId === addA.id, st.pinnedId)
+      await js(`window.waMulti.openAccount("${addA.id}")`)
+      await wait(700)
+      check('pinned opens in slot a', slotOf.get(addA.id) === 'a', String(slotOf.get(addA.id)))
+      check('pinned account has a live view', views.has(addA.id) === true)
 
-      // 5. state reflects the new account
-      const st = await win.webContents.executeJavaScript('window.waMulti.getState()')
-      check('getState lists 1 account', st.accounts.length === 1, `n=${st.accounts.length}`)
-      check('account name persisted', st.accounts[0] && st.accounts[0].name === 'SelfTest 1')
+      // 4. dual mode: office opens alongside
+      await js(`window.waMulti.openAccount("${addB.id}")`)
+      await wait(700)
+      check('office opens in slot b (dual)', slotOf.get(addB.id) === 'b', String(slotOf.get(addB.id)))
+      const ba = views.get(addA.id).getBounds()
+      const bb = views.get(addB.id).getBounds()
+      check('two views side by side', ba.width > 100 && bb.width > 100 && bb.x >= ba.width - 2, `a=${ba.width} b.x=${bb.x}`)
+      check('max 2 live views', views.size === 2, `n=${views.size}`)
 
-      // 6. accounts.json written to disk
-      const onDisk = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8'))
-      check('accounts.json on disk', onDisk.length === 1 && onDisk[0].name === 'SelfTest 1')
-
-      // 7. theme toggle persists
-      await win.webContents.executeJavaScript('window.waMulti.setTheme("light")')
-      const prefs = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8'))
-      check('theme pref persisted', prefs.theme === 'light', JSON.stringify(prefs))
-      await win.webContents.executeJavaScript('window.waMulti.setTheme("dark")')
-
-      // 8. openAccount creates a live BrowserView (WA Web may be offline; we only
-      //    assert the view exists + bounds are sane, not that it logged in)
-      await win.webContents.executeJavaScript(`window.waMulti.openAccount("${addRes.id}")`)
-      await wait(1200)
-      check('live BrowserView created', !!liveView)
-      check('live account tracked', liveAccountId === addRes.id, `live=${liveAccountId}`)
-      if (liveView) {
-        const b = liveView.getBounds()
-        check('live view bounds sane', b.width > 100 && b.height > 100 && b.y >= 40, JSON.stringify(b))
-        check('live view url is WA Web', /web\.whatsapp\.com/.test(liveView.webContents.getURL()), liveView.webContents.getURL())
-        check('session partition per account', liveView.webContents.session === require('electron').session.fromPartition('persist:wa-' + addRes.id))
-      }
-
-      // 9. switching accounts swaps the view
-      const add2 = await win.webContents.executeJavaScript('window.waMulti.addAccount("SelfTest 2")')
-      await win.webContents.executeJavaScript(`window.waMulti.openAccount("${add2.id}")`)
-      await wait(1000)
-      check('switch swaps live account', liveAccountId === add2.id, `live=${liveAccountId}`)
-      check('only one view at a time', BrowserWindow.getAllWindows().length === 1)
-
-      // 10. close + remove cleans up
-      await win.webContents.executeJavaScript('window.waMulti.closeAccount()')
-      check('closeAccount destroys view', !liveView)
-      await win.webContents.executeJavaScript(`window.waMulti.removeAccount("${add2.id}")`)
-      const st2 = await win.webContents.executeJavaScript('window.waMulti.getState()')
-      check('removeAccount drops it', st2.accounts.length === 1, `n=${st2.accounts.length}`)
-
-      // 11. UI menu renders account rows + unread badge slot
-      const menuHtml = await win.webContents.executeJavaScript('document.getElementById("accMenu").innerHTML')
-      check('menu renders account row', /SelfTest 1/.test(menuHtml))
-      check('menu has add row', /Tambah akun/.test(menuHtml))
-
-      // 12. light theme applies CSS variables
-      await win.webContents.executeJavaScript('window.waMulti.setTheme("light"); document.documentElement.setAttribute("data-theme","light")')
-      const bg = await win.webContents.executeJavaScript('getComputedStyle(document.body).backgroundColor')
-      check('light theme background applied', bg === 'rgb(255, 255, 255)', bg)
-
-      // 13. theme toggle button flips state in the real UI
-      await win.webContents.executeJavaScript('document.getElementById("themeBtn").click()')
-      await wait(300)
-      const themeAfter = await win.webContents.executeJavaScript('document.documentElement.getAttribute("data-theme")')
-      check('theme button toggles to dark', themeAfter === 'dark', `got=${themeAfter}`)
-
-      // 14. REGRESSION: dropdown must hide the WA view while open — WebContentsView
-      // paints ABOVE the HTML, so without this the menu is invisible/unclickable
-      await win.webContents.executeJavaScript(`window.waMulti.openAccount("${addRes.id}")`)
-      await wait(600)
-      await win.webContents.executeJavaScript('document.getElementById("accBtn").click()')
-      await wait(350)
-      const hiddenB = liveView.getBounds()
-      check('menu open hides WA view', hiddenB.width === 0 && hiddenB.height === 0, JSON.stringify(hiddenB))
-      await win.webContents.executeJavaScript('document.getElementById("accBtn").click()')
-      await wait(350)
-      const shownB = liveView.getBounds()
-      check('menu close restores WA view', shownB.width > 100 && shownB.height > 100, JSON.stringify(shownB))
-
-      // 15. REGRESSION: rename via dialog (prompt() is unsupported in Electron)
-      await win.webContents.executeJavaScript('document.querySelector(".acc-item .ren").click()')
-      await wait(250)
-      const dlgOpen = await win.webContents.executeJavaScript('document.getElementById("renameDlg").open')
-      check('rename dialog opens', dlgOpen === true)
-      await win.webContents.executeJavaScript('document.getElementById("renameInput").value = "Renamed Acc"; document.querySelector("#renameDlg form").requestSubmit()')
+      // 5. solo mode parks the office account
+      await js('window.waMulti.setTabMode("solo")')
       await wait(400)
-      const st3 = await win.webContents.executeJavaScript('window.waMulti.getState()')
-      check('rename applied via dialog', st3.accounts[0].name === 'Renamed Acc', st3.accounts[0].name)
+      check('solo mode parks office view', !views.has(addB.id), `n=${views.size}`)
+      check('solo keeps pinned alive', views.has(addA.id))
+      const bSolo = views.get(addA.id).getBounds()
+      check('solo gives pinned full width', bSolo.width > 1000, JSON.stringify(bSolo))
+      await js('window.waMulti.setTabMode("dual")')
+      await wait(300)
+      check('tabMode persisted', JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')).tabMode === 'dual')
 
-      // 16. dialog covers stage too (WA view hidden while addDlg open)
-      await win.webContents.executeJavaScript('openAddDialog()')
+      // 6. overlay hides views (WebContentsView paints above HTML)
+      await js('window.waMulti.setOverlayOpen(true)')
+      await wait(250)
+      check('overlay hides views', [...views.values()].every(v => v.getBounds().width === 0))
+      await js('window.waMulti.setOverlayOpen(false)')
+      await wait(250)
+      check('overlay close restores views', [...views.values()].every(v => v.getBounds().width > 100))
+
+      // 7. park
+      await js(`window.waMulti.openAccount("${addB.id}")`)
+      await wait(500)
+      await js(`window.waMulti.parkAccount("${addB.id}")`)
+      check('parkAccount destroys office view', !views.has(addB.id))
+      const parkPinned = await js(`window.waMulti.parkAccount("${addA.id}")`)
+      check('pinned account cannot be parked', parkPinned.ok === false, JSON.stringify(parkPinned))
+
+      // 8. blast view (nav)
+      await js('switchView("blast")')
       await wait(300)
-      const dlgB = liveView.getBounds()
-      check('add dialog hides WA view', dlgB.width === 0 && dlgB.height === 0, JSON.stringify(dlgB))
-      await win.webContents.executeJavaScript('document.getElementById("addCancel").click()')
-      await wait(300)
-      const dlgB2 = liveView.getBounds()
-      check('add dialog close restores WA view', dlgB2.width > 100, JSON.stringify(dlgB2))
+      check('blast view reachable', (await js('document.getElementById("view-blast").classList.contains("active")')) === true)
+      check('blast account checklist rendered', /Sweety 1/.test(await js('document.getElementById("blastAccounts").innerHTML')))
+      await js('switchView("chat")')
+      await wait(200)
+
+      // 9. CSV parser
+      const csv = parseCsv('Name,Phone\nelsa,83180503972\nnisca,081211679557\n"Ada, Sari",089652171242\n')
+      check('csv parses rows', csv.length === 3, `n=${csv.length}`)
+      check('csv normalizes 0-prefix', csv[1].phone === '6281211679557', csv[1].phone)
+      check('csv handles quoted comma', csv[2].name === 'Ada, Sari', csv[2].name)
+      const csv2 = parseCsv('nama;nomor\nbudi;628123456789\n')
+      check('csv detects semicolon delimiter', csv2.length === 1 && csv2[0].phone === '628123456789', JSON.stringify(csv2))
+
+      // 10. jid normalization
+      check('toJid 08xx -> 628xx@c.us', toJid('085284771336') === '6285284771336@c.us', toJid('085284771336'))
+      check('toJid rejects junk', toJid('abc') === null)
+
+      // 11. distribution = split (round robin, no overlap)
+      const tg = [{ phone: '1' }, { phone: '2' }, { phone: '3' }, { phone: '4' }, { phone: '5' }]
+      const buckets = splitTargets(tg, ['a1', 'a2'])
+      check('split covers all targets once', buckets.get('a1').length + buckets.get('a2').length === 5)
+      check('split is balanced', buckets.get('a1').length === 3 && buckets.get('a2').length === 2)
+
+      // 12. schedule add + skip-on-late logic
+      const schRes = await js(`window.waMulti.addSchedule({ label:"Test Jadwal", kind:"personal", when: Date.now()+3600000, targets:[{phone:"628123456789"}], message:"hi", accounts:["${addA.id}"], delaySec:30, mode:"split" })`)
+      check('schedule added', schRes.ok === true, JSON.stringify(schRes))
+      check('schedule persisted to disk', JSON.parse(fs.readFileSync(SCHEDULES_FILE, 'utf8')).length === 1)
+      const badSch = await js('window.waMulti.addSchedule({ when: 1, targets:[], accounts:[] })')
+      check('schedule rejects past time', badSch.ok === false, JSON.stringify(badSch))
+      await js(`window.waMulti.cancelSchedule("${schRes.id}")`)
+      check('schedule cancel works', JSON.parse(fs.readFileSync(SCHEDULES_FILE, 'utf8'))[0].status === 'cancelled')
+      await js(`window.waMulti.deleteSchedule("${schRes.id}")`)
+      check('schedule delete works', JSON.parse(fs.readFileSync(SCHEDULES_FILE, 'utf8')).length === 0)
+
+      // 13. daily cap guard
+      await js('window.waMulti.setDailyCap(25)')
+      check('daily cap persisted', JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')).dailyCap === 25)
+      check('sentToday starts at 0', sentToday(addA.id) === 0)
+
+      // 14. history + counters
+      const fakeJob = { id: 'job-test', kind: 'personal', label: 'test' }
+      recordHistory(fakeJob, addA.id, 'Pribadi', { phone: '628111', name: 'x' }, 'sent', null)
+      recordHistory(fakeJob, addA.id, 'Pribadi', { phone: '628112', name: 'y' }, 'failed', 'boom')
+      check('history records sent', sentToday(addA.id) === 1, `n=${sentToday(addA.id)}`)
+      check('history file written', JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')).length === 2)
+      await js('window.waMulti.clearHistory()')
+      check('history cleared', JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')).length === 0)
+
+      // 15. engine bundle vendored + injectable API names present
+      check('wa-js bundle vendored', WAJS_BUNDLE.length > 100000, `bytes=${WAJS_BUNDLE.length}`)
+      check('engine exposes sendTextMessage', /sendTextMessage/.test(WAJS_BUNDLE))
+      check('engine exposes getAllGroups', /getAllGroups/.test(WAJS_BUNDLE))
+      check('engine exposes getGroupInfoFromInviteCode', /getGroupInfoFromInviteCode/.test(WAJS_BUNDLE))
+
+      // 16. blast guard rails
+      const noAcc = await js('window.waMulti.startBlast({ kind:"personal", targets:[{phone:"628123"}], accounts:[], message:"x" })')
+      check('blast needs an account', noAcc.ok === false, JSON.stringify(noAcc))
+      const noTgt = await js(`window.waMulti.startBlast({ kind:"personal", targets:[], accounts:["${addA.id}"], message:"x" })`)
+      check('blast needs targets', noTgt.ok === false, JSON.stringify(noTgt))
+      const noMsg = await js(`window.waMulti.startBlast({ kind:"personal", targets:[{phone:"628123"}], accounts:["${addA.id}"], message:"" })`)
+      check('blast needs a message', noMsg.ok === false, JSON.stringify(noMsg))
+
+      // 17. remove account cleans up
+      await js(`window.waMulti.removeAccount("${addB.id}")`)
+      check('removeAccount drops it', (await js('window.waMulti.getState()')).accounts.length === 1)
+
+      // 18. dialogs (prompt() unsupported in Electron)
+      await js('openAddDialog()')
+      await wait(200)
+      check('add dialog opens', (await js('document.getElementById("addDlg").open')) === true)
+      check('dialog hides views', [...views.values()].every(v => v.getBounds().width === 0))
+      await js('document.getElementById("addCancel").click()')
+      await wait(250)
+      check('dialog close restores views', [...views.values()].every(v => v.getBounds().width > 100))
     } catch (e) {
       check('harness completed without exception', false, e.message)
     }
@@ -206,229 +1055,27 @@ function runSelfTest () {
     const failed = results.filter(r => r.startsWith('FAIL')).length
     console.log(`===== ${results.length - failed}/${results.length} passed, ${failed} failed =====\n`)
 
-    // optional visual capture: WA_MULTI_SHOT=/path/prefix
     if (process.env.WA_MULTI_SHOT) {
       const cap = async (name) => {
         const img = await win.webContents.capturePage()
         fs.writeFileSync(`${process.env.WA_MULTI_SHOT}-${name}.png`, img.toPNG())
         console.log('shot:', `${process.env.WA_MULTI_SHOT}-${name}.png`)
       }
-      const capView = async (name) => {
-        if (!liveView) return
-        const img = await liveView.webContents.capturePage()
-        fs.writeFileSync(`${process.env.WA_MULTI_SHOT}-${name}.png`, img.toPNG())
-        console.log('shot:', `${process.env.WA_MULTI_SHOT}-${name}.png`)
-      }
-      await win.webContents.executeJavaScript('document.documentElement.setAttribute("data-theme","dark"); window.waMulti.setTheme("dark")')
-      await win.webContents.executeJavaScript('document.getElementById("accMenu").classList.remove("hidden")')
-      await wait(300)
-      await cap('dark-menu')
+      await win.webContents.executeJavaScript('document.documentElement.setAttribute("data-theme","dark"); window.waMulti.setTheme("dark"); switchView("blast")')
+      await wait(500)
+      await cap('dark-blast')
       await win.webContents.executeJavaScript('document.documentElement.setAttribute("data-theme","light"); window.waMulti.setTheme("light")')
-      await wait(300)
-      await cap('light-menu')
-      await win.webContents.executeJavaScript('document.getElementById("accMenu").classList.add("hidden")')
-      await win.webContents.executeJavaScript('document.getElementById("welcome").classList.remove("hidden")')
-      await wait(200)
-      await cap('light-welcome')
-
-      // capture the LIVE WA Web view itself (proves QR renders, not the Chrome-block page)
-      const addShot = await win.webContents.executeJavaScript('window.waMulti.addAccount("ShotAcc")')
-      await win.webContents.executeJavaScript(`window.waMulti.openAccount("${addShot.id}")`)
-      await wait(9000)
-      await capView('wa-web')
-      // maximize test: bounds must follow the window
-      win.maximize()
-      await wait(1500)
-      const mb = liveView ? liveView.getBounds() : null
-      const cb = win.getContentBounds()
-      console.log(`MAXIMIZE CHECK: view=${JSON.stringify(mb)} window=${cb.width}x${cb.height}`)
-      await capView('wa-web-maximized')
-      win.unmaximize()
-      await wait(800)
+      await wait(400)
+      await cap('light-blast')
+      await win.webContents.executeJavaScript('switchView("schedule")')
+      await wait(400)
+      await cap('light-schedule')
+      await win.webContents.executeJavaScript('switchView("chat"); document.documentElement.setAttribute("data-theme","dark"); window.waMulti.setTheme("dark")')
+      await wait(400)
+      await cap('dark-chat')
     }
-    // cleanup test artifacts
+
     try { fs.rmSync(userDataDir, { recursive: true, force: true }) } catch (_) {}
     app.exit(failed ? 1 : 0)
   })
 }
-
-app.on('window-all-closed', () => app.quit())
-app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
-
-// ── Live WA Web view management ───────────────────────────────
-// One BrowserView at a time, swap on account switch. Session persisted via
-// partition per account id so login survives restarts.
-let liveView = null
-let liveAccountId = null
-
-function destroyLiveView () {
-  if (!liveView) return
-  try { win.contentView.removeChildView(liveView) } catch (_) {}
-  try { liveView.webContents.close() } catch (_) {}
-  liveView = null
-  liveAccountId = null
-}
-
-function viewBounds () {
-  if (!win) return { x: 0, y: 0, width: 0, height: 0 }
-  if (overlayOpen) return { x: 0, y: 0, width: 0, height: 0 } // popup has the stage
-  const b = win.getContentBounds()
-  const top = typeof uiTop === 'number' ? uiTop : 48
-  return { x: 0, y: top, width: b.width, height: Math.max(1, b.height - top) }
-}
-
-let uiTop = 48
-let overlayOpen = false
-let currentTheme = prefs.theme === 'light' ? 'light' : 'dark'
-
-function createLiveView (accountId) {
-  const view = new WebContentsView({
-    webPreferences: {
-      partition: 'persist:wa-' + accountId,
-      contextIsolation: true,
-      nodeIntegration: false,
-      spellcheck: false
-    }
-  })
-  // Resource dieting: block heavy third-party trackers inside WA Web
-  view.webContents.session.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details, cb) => {
-    const u = details.url
-    if (/google-analytics|googletagmanager|doubleclick|facebook\.net|scorecardresearch|quantserve/i.test(u)) {
-      return cb({ cancel: true })
-    }
-    cb({ cancel: false })
-  })
-  view.setBounds(viewBounds())
-  // WA Web blocks the Electron UA ("works with Chrome 100+" page) →
-  // spoof a standard Chrome UA. Electron 33 = Chromium 130, so Chrome/130 is honest.
-  view.webContents.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36')
-  view.webContents.loadURL('https://web.whatsapp.com')
-  view.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/i.test(url)) shell.openExternal(url)
-    return { action: 'deny' }
-  })
-  return view
-}
-
-// ── IPC: renderer <-> main ────────────────────────────────────
-function notifyStateChanged () {
-  try { win.webContents.send('wa-multi:stateChanged') } catch (_) {}
-}
-
-ipcMain.handle('wa-multi:getState', () => {
-  return {
-    accounts: accounts.map(a => ({
-      id: a.id,
-      name: a.name,
-      color: a.color || null,
-      lastOpened: a.lastOpened || null
-    })),
-    liveAccountId,
-    theme: currentTheme
-  }
-})
-
-ipcMain.handle('wa-multi:addAccount', (e, name) => {
-  const id = 'acc-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
-  const palette = ['#25d366', '#34b7f1', '#f15f6d', '#f2a33c', '#a78bfa', '#2dd4bf']
-  const color = palette[accounts.length % palette.length]
-  accounts.push({ id, name: String(name || ('Akun ' + (accounts.length + 1))).trim(), color })
-  saveAccounts(accounts)
-  notifyStateChanged()
-  return { ok: true, id }
-})
-
-ipcMain.handle('wa-multi:renameAccount', (e, { id, name }) => {
-  const a = accounts.find(x => x.id === id)
-  if (a && name) { a.name = String(name).trim(); saveAccounts(accounts); notifyStateChanged() }
-  return { ok: true }
-})
-
-ipcMain.handle('wa-multi:removeAccount', (e, id) => {
-  const wasLive = liveAccountId === id
-  accounts = accounts.filter(a => a.id !== id)
-  saveAccounts(accounts)
-  // wipe session dir so re-adding gets a fresh login
-  const dir = path.join(SESSIONS_DIR, id)
-  try { fs.rmSync(dir, { recursive: true, force: true }) } catch (_) {}
-  // also clear the partition's localStorage/indexeddb (stored in userData/Partitions)
-  try {
-    const partDir = path.join(app.getPath('userData'), 'Partitions', 'wa-' + id)
-    fs.rmSync(partDir, { recursive: true, force: true })
-  } catch (_) {}
-  if (wasLive) { destroyLiveView(); win.webContents.send('wa-multi:liveClosed') }
-  notifyStateChanged()
-  return { ok: true }
-})
-
-ipcMain.handle('wa-multi:openAccount', async (e, id) => {
-  if (!accounts.some(a => a.id === id)) return { ok: false, error: 'akun tidak ada' }
-  if (liveAccountId === id && liveView) return { ok: true, alreadyOpen: true }
-  destroyLiveView()
-  liveView = createLiveView(id)
-  liveAccountId = id
-  const a = accounts.find(x => x.id === id)
-  a.lastOpened = Date.now()
-  saveAccounts(accounts)
-  win.contentView.addChildView(liveView)
-  liveView.setBounds(viewBounds())
-  notifyStateChanged()
-  return { ok: true }
-})
-
-ipcMain.handle('wa-multi:closeAccount', () => {
-  destroyLiveView()
-  notifyStateChanged()
-  return { ok: true }
-})
-
-ipcMain.handle('wa-multi:setTheme', (e, theme) => {
-  currentTheme = theme === 'light' ? 'light' : 'dark'
-  prefs.theme = currentTheme
-  savePrefs(prefs)
-  nativeTheme.themeSource = currentTheme
-  notifyStateChanged()
-  return { ok: true, theme: currentTheme }
-})
-
-ipcMain.handle('wa-multi:setUITop', (e, top) => {
-  uiTop = Number(top) || 48
-  if (liveView) liveView.setBounds(viewBounds())
-  return { ok: true }
-})
-
-// WebContentsView always paints above the renderer HTML. When a native-feel
-// popup (dropdown menu / dialog) is open, we must get the WA view OUT of the
-// way or it visually covers and eats clicks on the popup.
-ipcMain.handle('wa-multi:setOverlayOpen', (e, open) => {
-  overlayOpen = !!open
-  if (liveView) liveView.setBounds(viewBounds())
-  return { ok: true }
-})
-
-// let renderer know when window resized (setAutoResize handles most; belt & suspenders)
-function attachResizeHandler () {
-  if (!win) return
-  win.removeAllListeners('resize')
-  win.on('resize', () => { if (liveView) liveView.setBounds(viewBounds()) })
-  win.on('maximize', () => { if (liveView) liveView.setBounds(viewBounds()) })
-  win.on('unmaximize', () => { if (liveView) liveView.setBounds(viewBounds()) })
-  win.on('enter-full-screen', () => { if (liveView) liveView.setBounds(viewBounds()) })
-  win.on('leave-full-screen', () => { if (liveView) liveView.setBounds(viewBounds()) })
-}
-attachResizeHandler()
-
-// ── unread badge per account (updated when account is opened) ─
-// The renderer reads the title of the live view (WA Web sets unread count in
-// document title like "(3) WhatsApp"). We forward it to the shell.
-setInterval(() => {
-  if (!win || win.isDestroyed()) return
-  // self-heal bounds every tick too (covers maximize/fullscreen edge cases)
-  if (liveView) liveView.setBounds(viewBounds())
-  if (!liveView || liveView.webContents.isDestroyed()) return
-  const title = liveView.webContents.getTitle()
-  if (!title) return
-  const m = title.match(/^\((\d+)\)/)
-  const unread = m ? parseInt(m[1], 10) : 0
-  win.webContents.send('wa-multi:unread', { accountId: liveAccountId, unread })
-}, 4000)

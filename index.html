@@ -12,18 +12,31 @@
     <div class="brand">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5.1-1.3A10 10 0 1 0 12 2Zm5.2 14.2c-.2.6-1.2 1.2-1.7 1.2-.4.1-1 .1-1.6-.1-2.6-.8-4.3-2.6-5.6-4.8-.5-.9-.9-2-.7-2.9.1-.6.6-1.5 1.2-1.7.3-.1.8-.1 1 .1.2.2.9 1.6.9 1.8.1.2 0 .4-.1.6l-.5.7c-.2.2-.2.4-.1.6.5.9 1.5 1.9 2.5 2.4.2.1.4.1.6-.1l.7-.7c.2-.2.4-.2.6-.1.2.1 1.6.8 1.8.9.2.3.2.7 0 1.1Z" fill="currentColor"/></svg>
       <span>WA Multi</span>
+      <span class="ver">v2.0</span>
     </div>
 
-    <div class="acc-switch" id="accSwitch">
-      <button id="accBtn" class="acc-btn" title="Ganti akun">
-        <span class="acc-dot" id="accDot"></span>
-        <span id="accName">Pilih akun</span>
-        <svg width="12" height="12" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>
+    <nav class="views-nav">
+      <button class="nav-btn active" data-view="chat">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-5A8 8 0 1 1 21 12Z" stroke="currentColor" stroke-width="2"/></svg>
+        Chat
       </button>
-      <div id="accMenu" class="acc-menu hidden"></div>
-    </div>
+      <button class="nav-btn" data-view="blast">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M4.5 19.5 19 5M19 5h-6M19 5v6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        Blast
+      </button>
+      <button class="nav-btn" data-view="schedule">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 7v5.5l3.5 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        Jadwal
+      </button>
+    </nav>
 
     <div class="spacer"></div>
+
+    <div class="tabmode" id="tabMode">
+      <span class="tm-label">Tab</span>
+      <button class="tm-opt" data-mode="dual" title="Pribadi + 1 office nyala barengan">2</button>
+      <button class="tm-opt" data-mode="solo" title="Cuma akun pribadi yang nyala">1</button>
+    </div>
 
     <button id="themeBtn" class="icon-btn" title="Mode gelap/terang">
       <svg id="iconMoon" width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" stroke="currentColor" stroke-width="2"/></svg>
@@ -31,16 +44,149 @@
     </button>
   </header>
 
+  <!-- ── Tab bar: account slots ────────────────────────────── -->
+  <div id="tabbar">
+    <div class="tabs" id="tabs"></div>
+    <button class="tab-add" id="tabAdd" title="Tambah akun">＋</button>
+  </div>
+
+  <!-- ── Stage (WA views are painted here by the main process) ── -->
   <main id="stage">
     <div id="welcome" class="welcome">
       <div class="welcome-card">
-        <svg width="72" height="72" viewBox="0 0 24 24" fill="none"><path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5.1-1.3A10 10 0 1 0 12 2Zm5.2 14.2c-.2.6-1.2 1.2-1.7 1.2-.4.1-1 .1-1.6-.1-2.6-.8-4.3-2.6-5.6-4.8-.5-.9-.9-2-.7-2.9.1-.6.6-1.5 1.2-1.7.3-.1.8-.1 1 .1.2.2.9 1.6.9 1.8.1.2 0 .4-.1.6l-.5.7c-.2.2-.2.4-.1.6.5.9 1.5 1.9 2.5 2.4.2.1.4.1.6-.1l.7-.7c.2-.2.4-.2.6-.1.2.1 1.6.8 1.8.9.2.3.2.7 0 1.1Z" fill="currentColor"/></svg>
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none"><path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5.1-1.3A10 10 0 1 0 12 2Zm5.2 14.2c-.2.6-1.2 1.2-1.7 1.2-.4.1-1 .1-1.6-.1-2.6-.8-4.3-2.6-5.6-4.8-.5-.9-.9-2-.7-2.9.1-.6.6-1.5 1.2-1.7.3-.1.8-.1 1 .1.2.2.9 1.6.9 1.8.1.2 0 .4-.1.6l-.5.7c-.2.2-.2.4-.1.6.5.9 1.5 1.9 2.5 2.4.2.1.4.1.6-.1l.7-.7c.2-.2.4-.2.6-.1.2.1 1.6.8 1.8.9.2.3.2.7 0 1.1Z" fill="currentColor"/></svg>
         <h2>Selamat datang di WA Multi</h2>
-        <p>Buka akun dari dropdown di atas, atau tambah akun baru.<br/>Setiap akun login sekali — abis itu selalu tersimpan.</p>
+        <p>Login nomor WA lu, atur yang mana jadi <b>akun pribadi</b>, terus blast ke banyak nomor dari banyak akun sekaligus.</p>
         <button id="welcomeAdd" class="primary-btn">+ Tambah akun pertama</button>
       </div>
     </div>
+
+    <!-- ── Blast view ──────────────────────────────────────── -->
+    <section id="view-blast" class="panel">
+      <div class="panel-scroll">
+        <div class="panel-head">
+          <h2>Blast</h2>
+          <p class="sub">Kirim pesan ke banyak nomor / grup, dari beberapa akun sekaligus.</p>
+        </div>
+
+        <div class="card">
+          <div class="card-title">1 · Target</div>
+          <div class="seg" id="kindSeg">
+            <button class="seg-opt active" data-kind="personal">Personal (nomor)</button>
+            <button class="seg-opt" data-kind="group">Grup</button>
+          </div>
+
+          <div id="targetPersonal">
+            <div class="src-row">
+              <button class="ghost-btn sm" id="btnUploadCsv">📁 Upload CSV</button>
+              <span class="src-note" id="csvNote">belum ada file</span>
+            </div>
+            <details class="src-more">
+              <summary>atau ambil dari kontak akun</summary>
+              <div class="src-row">
+                <select id="contactAccSel" class="sel"></select>
+                <button class="ghost-btn sm" id="btnFetchContacts">Ambil kontak</button>
+              </div>
+              <div class="mini-list" id="contactPick"></div>
+            </details>
+          </div>
+
+          <div id="targetGroup" class="hidden">
+            <div class="src-row">
+              <select id="groupAccSel" class="sel"></select>
+              <button class="ghost-btn sm" id="btnFetchGroups">Ambil daftar grup</button>
+            </div>
+            <div class="mini-list" id="groupPick"></div>
+            <div class="src-row">
+              <input id="inviteLink" class="inp" placeholder="atau paste link undangan grup (chat.whatsapp.com/...)" />
+              <button class="ghost-btn sm" id="btnAddInvite">Tambah</button>
+            </div>
+          </div>
+
+          <div class="target-summary">
+            <b id="targetCount">0</b> target siap
+            <button class="link-btn" id="btnClearTargets">kosongkan</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">2 · Pesan</div>
+          <textarea id="blastMsg" class="inp ta" rows="5" placeholder="Hai {nama}, ada promo hari ini..."></textarea>
+          <div class="chips" id="varChips">
+            <span class="chip-label">Sisipkan:</span>
+            <button class="chip" data-var="{nama}">{nama}</button>
+            <button class="chip" data-var="{nomor}">{nomor}</button>
+          </div>
+          <div class="src-row">
+            <button class="ghost-btn sm" id="btnMedia">📎 Lampirkan gambar/file</button>
+            <span class="src-note" id="mediaNote">tanpa lampiran</span>
+            <button class="link-btn hidden" id="btnMediaClear">hapus</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">3 · Kirim dari akun</div>
+          <p class="sub small">Centang akun yang mau dipakai. Yang gak dicentang gak ngirim apa-apa.</p>
+          <div id="blastAccounts" class="acc-checklist"></div>
+          <div class="field-row">
+            <label>Pembagian</label>
+            <select id="splitMode" class="sel">
+              <option value="split">Bagi rata (tiap nomor dikirim 1 akun)</option>
+              <option value="all">Semua akun kirim ke semua (tiap nomor dapat banyak pesan)</option>
+            </select>
+          </div>
+          <div class="field-row">
+            <label>Jeda antar pesan</label>
+            <input id="delaySec" class="inp num" type="number" min="5" value="30" /> <span class="unit">detik</span>
+            <span class="cap-note">batas harian <b id="capVal">40</b>/akun <button class="link-btn" id="btnCap">ubah</button></span>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button class="primary-btn" id="btnStart">▶ Mulai Blast</button>
+          <button class="ghost-btn" id="btnSchedule">⏰ Jadwalkan</button>
+        </div>
+
+        <div class="card hidden" id="progressCard">
+          <div class="card-title">Progress <button class="link-btn" id="btnStopAll">⏹ stop semua</button></div>
+          <div id="progList" class="prog-list"></div>
+          <div class="prog-log" id="progLog"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Riwayat <button class="link-btn" id="btnClearHist">hapus riwayat</button></div>
+          <div id="histList" class="hist-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Schedule view ───────────────────────────────────── -->
+    <section id="view-schedule" class="panel">
+      <div class="panel-scroll">
+        <div class="panel-head">
+          <h2>Jadwal</h2>
+          <p class="sub">Blast otomatis di waktu tertentu. App jalan di background (tray) selama ada jadwal pending.</p>
+        </div>
+        <div class="warn-box">
+          Kalau laptop mati / app gak jalan pas waktunya, jadwal itu <b>di-skip</b> (gak nyusul).
+        </div>
+        <div id="schedList" class="sched-list"></div>
+      </div>
+    </section>
   </main>
+
+  <!-- ── Dialogs ───────────────────────────────────────────── -->
+  <dialog id="addDlg">
+    <form method="dialog">
+      <h3>Tambah akun</h3>
+      <input id="newName" type="text" placeholder="Nama akun (mis. Sweety 1)" maxlength="30" required />
+      <p class="hint">Nanti lu scan QR sekali buat akun ini.</p>
+      <div class="row">
+        <button type="button" class="ghost-btn" id="addCancel">Batal</button>
+        <button type="submit" class="primary-btn" id="addSave">Simpan</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="renameDlg">
     <form method="dialog">
@@ -53,14 +199,29 @@
     </form>
   </dialog>
 
-  <dialog id="addDlg">
+  <dialog id="scheduleDlg">
     <form method="dialog">
-      <h3>Tambah akun</h3>
-      <input id="newName" type="text" placeholder="Nama akun (mis. Sweety 1)" maxlength="30" required />
-      <p class="hint">Nanti lu scan QR sekali buat akun ini.</p>
+      <h3>Jadwalkan blast</h3>
+      <p class="hint" id="schedSummary"></p>
+      <label class="dlg-label">Tanggal & jam</label>
+      <input id="schedWhen" type="datetime-local" required />
+      <label class="dlg-label">Nama jadwal (opsional)</label>
+      <input id="schedLabel" type="text" placeholder="mis. Promo pagi" maxlength="40" />
       <div class="row">
-        <button type="button" class="ghost-btn" id="addCancel">Batal</button>
-        <button type="submit" class="primary-btn" id="addSave">Simpan</button>
+        <button type="button" class="ghost-btn" id="schedCancel">Batal</button>
+        <button type="submit" class="primary-btn">Jadwalkan</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="capDlg">
+    <form method="dialog">
+      <h3>Batas harian per akun</h3>
+      <p class="hint">Batas jumlah pesan yang boleh dikirim 1 akun per hari. 0 = tanpa batas.</p>
+      <input id="capInput" type="number" min="0" max="1000" />
+      <div class="row">
+        <button type="button" class="ghost-btn" id="capCancel">Batal</button>
+        <button type="submit" class="primary-btn">Simpan</button>
       </div>
     </form>
   </dialog>
