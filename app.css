@@ -345,3 +345,33 @@ dialog .dlg-label { display: block; font-size: 12px; color: var(--fg2); margin: 
   padding: 10px 18px; border-radius: 10px; font-size: 13px;
   box-shadow: 0 8px 32px var(--shadow); z-index: 999;
 }
+/* ── Right-click context menu (tab) ─────────── */
+.acc-menu {
+  position: fixed;
+  min-width: 230px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 36px var(--shadow);
+  padding: 5px;
+  z-index: 1000;
+  cursor: default;
+}
+.acc-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: 7px;
+  font-size: 13.5px;
+  color: var(--fg);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.acc-item:hover { background: var(--bg3); }
+.acc-item.disabled { opacity: .45; pointer-events: none; }
+
+/* batched picker footer */
+.mini-foot{display:flex;align-items:center;gap:10px;padding:4px 2px;flex-wrap:wrap}
+.mini-foot .sub.small{margin:0}

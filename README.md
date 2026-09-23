@@ -2,6 +2,14 @@
 
 Aplikasi desktop (Electron) buat buka **banyak akun WhatsApp dalam satu window** — plus **blast multi-akun** (personal & grup) dan **schedule**. Session per akun tersimpan permanen — scan QR **sekali** per nomor, abis itu selalu login.
 
+**Fitur v2.2.0:**
+- 🐛 **FIX blast macet 0/0 + stop gak jalan** — akar masalah: engine gak pernah nyambung ke WA Web 2026 (sistem modul berubah) + urutan cek login kebalik + stop gak menginterupsi saat nunggu. Dites: kirim jalan, stop jalan di tengah nunggu.
+- 🐛 **FIX klik kanan tab** — menu kemarin transparan & kebanget (teks ketiban, klik gak kebaca, kursor I-beam). Sekarang menu solid, di atas segalanya.
+- ✨ **Kontak & grup: cari nama + tampil per-batch 7** + tombol "tampilin lagi" + "pilih semua hasil (yang cocok)".
+- ✨ **Pin ke-2 via klik kanan** — maksimal 2 pin, yang dipin tetap hidup di background.
+- 🐛 FIX: dropdown akun di panel kontak/grup kadang kosong.
+- 🛡 Semua pengiriman pesan (teks & media) sekarang ada timeout 60 dtk — WA ngambek = job tetap jalan (error jelas), bukan hang selamanya.
+
 Dibuat buat yang megang beberapa nomor WA (mis. 5 nomor toko) tapi males buka 5 window/browser — dan butuh kirim pesan ke banyak nomor dari beberapa akun sekaligus.
 
 ![preview](build/icon.png)

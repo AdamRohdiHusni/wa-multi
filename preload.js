@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('waMulti', {
   removeAccount: (id) => ipcRenderer.invoke('wa-multi:removeAccount', id),
   openAccount: (id) => ipcRenderer.invoke('wa-multi:openAccount', id),
   parkAccount: (id) => ipcRenderer.invoke('wa-multi:parkAccount', id),
-  setPinned: (id) => ipcRenderer.invoke('wa-multi:setPinned', id),
+  setPinned: (id, on) => ipcRenderer.invoke('wa-multi:setPinned', { id, on: on !== false }),
   // prefs
   setTabMode: (mode) => ipcRenderer.invoke('wa-multi:setTabMode', mode),
   setLayoutMode: (mode) => ipcRenderer.invoke('wa-multi:setLayoutMode', mode),

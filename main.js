@@ -70,6 +70,7 @@ if (!prefs.layoutMode) prefs.layoutMode = 'full' // 'full' = tab-by-tab full scr
 if (!prefs.theme) prefs.theme = 'dark'
 if (typeof prefs.dailyCap !== 'number') prefs.dailyCap = 40
 if (!prefs.pinnedId) prefs.pinnedId = null
+if (!prefs.pin2Id) prefs.pin2Id = null
 
 // ── Main window ───────────────────────────────────────────────
 let win = null
@@ -91,7 +92,7 @@ function createWindow () {
     }
   })
   Menu.setApplicationMenu(null)
-  win.loadFile('index.html')
+  win.loadFile(path.join(__dirname, 'index.html'))
   if (IS_DEV) win.webContents.openDevTools({ mode: 'detach' })
   attachResizeHandler()
 
@@ -176,12 +177,17 @@ function FULL () {
 const HIDDEN = { x: 0, y: 0, width: 0, height: 0 }
 
 function viewBounds (accountId) {
-  if (!win || overlayOpen || !slotOf.has(accountId)) return HIDDEN
+  if (!win || overlayOpen) return HIDDEN
+  const isSlot = slotOf.has(accountId)
+  const isActive = accountId === activeAccountId
+  // alive = pinned (slot) or the active transient tab; everything else hidden
+  if (!isSlot && !isActive) return HIDDEN
   const r = stageRect()
   // split layout only applies in dual tab mode when two slots are actually occupied
-  if (prefs.tabMode === 'dual' && prefs.layoutMode === 'split' && hasSlot('b')) {
+  const s = slotOf.get(accountId)
+  if (prefs.tabMode === 'dual' && prefs.layoutMode === 'split' && hasSlot('a') && hasSlot('b') && (s === 'a' || s === 'b')) {
     const half = Math.floor(r.width / 2)
-    return slotOf.get(accountId) === 'a'
+    return s === 'a'
       ? { x: 0, y: r.y, width: half, height: r.height }
       : { x: half, y: r.y, width: r.width - half, height: r.height }
   }
@@ -287,16 +293,55 @@ function showInSlot (accountId, slot) {
   return { ok: true, slot }
 }
 
+// Non-pinned accounts live as the active transient tab (no slot).
+// Only ONE transient stays alive: opening another parks the previous one.
+// Pinned accounts (personal + pin2) are never evicted by transients.
+function showTransient (accountId) {
+  const acc = accounts.find(a => a.id === accountId)
+  if (!acc) return { ok: false, error: 'akun tidak ada' }
+  if (prefs.pinnedId === accountId) return showInSlot(accountId, 'a')
+  if (prefs.pin2Id === accountId) return showInSlot(accountId, 'b')
+  const worker = activeJob && activeJob.currentWorker
+  for (const [id, s] of [...slotOf]) {
+    if (s !== 'a' && s !== 'b' && id !== accountId) {
+      if (id === worker) continue // blast worker stays alive until the job releases it
+      slotOf.delete(id)
+      destroyView(id) // park previous transient
+    }
+  }
+  // a transient that is currently active but slot-less is also parked
+  for (const id of [...views.keys()]) {
+    if (id !== accountId && id !== prefs.pinnedId && id !== prefs.pin2Id && !slotOf.has(id) && id !== worker) {
+      destroyView(id)
+    }
+  }
+  if (!views.has(accountId)) createView(accountId)
+  acc.lastOpened = Date.now()
+  saveAccounts()
+  layoutViews()
+  activeAccountId = accountId
+  bringToFront(accountId)
+  notifyStateChanged()
+  return { ok: true }
+}
+
 function openAccount (accountId) {
   const isPinned = prefs.pinnedId === accountId
+  const isPin2 = prefs.pin2Id === accountId
   if (isPinned) return showInSlot(accountId, 'a')
-  if (prefs.tabMode === 'solo') return showInSlot(accountId, 'a')
-  // dual mode: office account goes to slot b (or a if pinned slot is empty/free)
-  return showInSlot(accountId, 'b')
+  if (isPin2) return showInSlot(accountId, 'b')
+  if (prefs.tabMode === 'solo') {
+    // solo = "cuma pribadi". Opening another account implies 2-tab mode.
+    prefs.tabMode = 'dual'
+    savePrefs()
+  }
+  // dual mode: non-pinned account becomes the active tab (pins stay alive)
+  return showTransient(accountId)
 }
 
 function parkAccount (accountId) {
-  if (prefs.pinnedId === accountId) return { ok: false, error: 'akun pribadi gak bisa diparkir' }
+  if (prefs.pinnedId === accountId) return { ok: false, error: 'akun pribadi gak bisa diparkir — lepas pin dulu' }
+  if (prefs.pin2Id === accountId) return { ok: false, error: 'akun ini ke-pin — lepas pin dulu buat parkir' }
   destroyView(accountId)
   if (!activeAccountId && views.size) activeAccountId = [...views.keys()][0]
   if (activeAccountId) bringToFront(activeAccountId)
@@ -318,19 +363,43 @@ async function ensureEngine (view, timeoutMs = 60000) {
     await wait(1000)
   }
   await wc.executeJavaScript(WAJS_BUNDLE).catch(() => {})
-  await wait(2500)
-  const ok = await wc.executeJavaScript('!!(window.WPP && window.WPP.isInjected)').catch(() => false)
-  return { ok, injected: true }
+  // WA Web 2026 uses metro-style globals (__d/require); wa-js's meta loader
+  // attaches a few seconds after the bundle executes → poll, don't sleep once.
+  const t1 = Date.now()
+  while (Date.now() - t1 < timeoutMs) {
+    const ok = await wc.executeJavaScript('!!(window.WPP && window.WPP.isInjected)').catch(() => false)
+    if (ok) return { ok: true, injected: true }
+    await wait(1000)
+  }
+  return { ok: false, injected: true }
 }
 
 async function isAuthenticated (view) {
-  return view.webContents.executeJavaScript('(window.WPP && window.WPP.conn && typeof window.WPP.conn.isAuthenticated === "function") ? !!window.WPP.conn.isAuthenticated() : false').catch(() => false)
+  // wa-js's isAuthenticated() returns a PROMISE — await it properly.
+  // Before the engine is injected, fall back to DOM signals (QR page vs app shell).
+  return view.webContents.executeJavaScript(`(async () => {
+    try {
+      if (window.WPP && window.WPP.conn && typeof window.WPP.conn.isAuthenticated === 'function') {
+        return !!(await window.WPP.conn.isAuthenticated())
+      }
+      const qr = document.querySelector('div[data-ref], canvas[aria-label*="Scan"]')
+      const shell = document.querySelector('#side, [data-testid="chat-list"], .app-wrapper-web.two')
+      return !qr && !!shell
+    } catch (e) { return false }
+  })()`).catch(() => false)
 }
 
-async function waitAuthenticated (view, timeoutMs = 90000) {
+async function waitAuthenticated (view, timeoutMs = 90000, abort = null, accountId = null, job = null) {
   const t0 = Date.now()
+  let lastBeat = 0
   while (Date.now() - t0 < timeoutMs) {
+    if (abort && abort()) return false
     if (await isAuthenticated(view)) return true
+    if (job && accountId && Date.now() - lastBeat > 10000) {
+      lastBeat = Date.now()
+      const a = accounts.find(x => x.id === accountId)
+      emitProgress({ phase: 'accountWait', jobId: job.id, accountId, name: a ? a.name : accountId, elapsedSec: Math.round((Date.now() - t0) / 1000) })
+    }
     await wait(1500)
   }
   return false
@@ -400,25 +469,34 @@ async function groupFromInvite (view, link) {
   return { ok: true, group: raw }
 }
 
+const SEND_TIMEOUT_MS = Math.max(10000, parseInt(process.env.WA_MULTI_SEND_TIMEOUT, 10) || 60000)
+
+function withTimeout (p, ms, errMsg) {
+  return Promise.race([
+    Promise.resolve(p),
+    new Promise(resolve => setTimeout(() => resolve({ ok: false, error: errMsg }), ms))
+  ])
+}
+
 async function sendText (view, jid, text) {
-  const res = await view.webContents.executeJavaScript(`(async () => {
+  const res = await withTimeout(view.webContents.executeJavaScript(`(async () => {
     try {
       await window.WPP.chat.sendTextMessage(${JSON.stringify(jid)}, ${JSON.stringify(text)}, { createChat: true, waitForAck: false })
       return { ok: true }
     } catch (e) { return { ok: false, error: String(e && e.message || e).slice(0,200) } }
-  })()`).catch(e => ({ ok: false, error: String(e).slice(0, 200) }))
+  })()`).catch(e => ({ ok: false, error: String(e).slice(0, 200) })), SEND_TIMEOUT_MS, 'timeout: WA gak selesai kirim dalam 60 dtk')
   return res || { ok: false, error: 'unknown' }
 }
 
 async function sendFile (view, jid, file, caption) {
-  const res = await view.webContents.executeJavaScript(`(async () => {
+  const res = await withTimeout(view.webContents.executeJavaScript(`(async () => {
     try {
       const opts = { createChat: true, waitForAck: false, type: 'auto-detect', filename: ${JSON.stringify(file.filename || 'file')} }
       if (${JSON.stringify(caption || '')}) opts.caption = ${JSON.stringify(caption || '')}
       await window.WPP.chat.sendFileMessage(${JSON.stringify(jid)}, ${JSON.stringify(file.dataUrl)}, opts)
       return { ok: true }
     } catch (e) { return { ok: false, error: String(e && e.message || e).slice(0,200) } }
-  })()`).catch(e => ({ ok: false, error: String(e).slice(0, 200) }))
+  })()`).catch(e => ({ ok: false, error: String(e).slice(0, 200) })), Math.max(SEND_TIMEOUT_MS, 120000), 'timeout: upload gak selesai dalam 120 dtk')
   return res || { ok: false, error: 'unknown' }
 }
 
@@ -455,17 +533,22 @@ function emitProgress (payload) {
 
 // Acquire a ready-to-send view for an account: reuse a live view if present,
 // otherwise spin up a temporary one (and tear it down afterwards).
-async function acquireWorker (accountId) {
+async function acquireWorker (accountId, job = null) {
   const existing = views.get(accountId)
   const temp = !existing
   const view = existing || createView(accountId)
   if (temp) { slotOf.delete(accountId); view.setBounds({ x: 0, y: 0, width: 0, height: 0 }) }
-  const auth = await waitAuthenticated(view, 90000)
+  const abort = () => !!job && (job.stopAll || (job.stopped && job.stopped.has(accountId)))
+  // inject engine FIRST — wa-js loads fine on the QR page (webpack already booted),
+  // and once injected we get the REAL promise-based auth signal.
+  await ensureEngine(view, 45000)
+  const authTimeout = Math.max(5000, parseInt(process.env.WA_MULTI_AUTH_TIMEOUT, 10) || 90000)
+  const auth = await waitAuthenticated(view, authTimeout, abort, accountId, job)
   if (!auth) {
     if (temp) destroyView(accountId)
-    return { ok: false, error: 'akun belum login / belum siap', temp }
+    return { ok: false, error: abort() ? 'dihentikan' : 'akun belum login / belum siap (cek QR di tab akun itu)', temp }
   }
-  const eng = await ensureEngine(view)
+  const eng = await ensureEngine(view, 60000)
   if (!eng.ok) {
     if (temp) destroyView(accountId)
     return { ok: false, error: 'gagal inject mesin blast', temp }
@@ -481,6 +564,14 @@ function splitTargets (targets, accountIds) {
   const buckets = new Map(accountIds.map(id => [id, []]))
   targets.forEach((t, i) => buckets.get(accountIds[i % accountIds.length]).push(t))
   return buckets
+}
+
+async function interruptibleWait (ms, job, accountId) {
+  const t0 = Date.now()
+  while (Date.now() - t0 < ms) {
+    if (job.stopAll || job.stopped.has(accountId)) return
+    await wait(500)
+  }
 }
 
 async function runBlastJob (job) {
@@ -507,15 +598,16 @@ async function runBlastJob (job) {
     const accName = acc ? acc.name : accountId
     const slice = buckets.get(accountId)
 
-    emitProgress({ phase: 'accountStart', jobId: job.id, accountId, name: accName, total: slice.length })
+    emitProgress({ phase: 'accountStart', jobId: job.id, accountId, name: accName, total: slice.length, status: 'nyalain' })
 
-    const w = await acquireWorker(accountId)
+    const w = await acquireWorker(accountId, job)
     if (!w.ok) {
       emitProgress({ phase: 'accountError', jobId: job.id, accountId, name: accName, error: w.error })
       slice.forEach(t => recordHistory(job, accountId, accName, t, 'failed', w.error))
       emitProgress({ phase: 'accountDone', jobId: job.id, accountId, name: accName, sent: 0, failed: slice.length, status: 'gagal: ' + w.error })
       continue
     }
+    job.currentWorker = accountId
 
     let sent = 0, failed = 0
     for (let i = 0; i < slice.length; i++) {
@@ -549,11 +641,12 @@ async function runBlastJob (job) {
       })
 
       if (i < slice.length - 1 && !job.stopAll && !job.stopped.has(accountId)) {
-        await wait(Math.max(5, job.delaySec || 30) * 1000)
+        await interruptibleWait(Math.max(5, job.delaySec || 30) * 1000, job, accountId)
       }
     }
 
     releaseWorker(accountId, w.temp)
+    if (job.currentWorker === accountId) job.currentWorker = null
     emitProgress({ phase: 'accountDone', jobId: job.id, accountId, name: accName, sent, failed, status: 'selesai' })
   }
 
@@ -653,6 +746,7 @@ ipcMain.handle('wa-multi:getState', () => ({
     sentToday: sentToday(a.id)
   })),
   pinnedId: prefs.pinnedId,
+  pin2Id: prefs.pin2Id || null,
   tabMode: prefs.tabMode,
   layoutMode: prefs.layoutMode,
   activeAccountId,
@@ -686,6 +780,7 @@ ipcMain.handle('wa-multi:removeAccount', (e, id) => {
   destroyView(id)
   accounts = accounts.filter(a => a.id !== id)
   if (prefs.pinnedId === id) prefs.pinnedId = null
+  if (prefs.pin2Id === id) { prefs.pin2Id = null; slotOf.delete(id) }
   saveAccounts(); savePrefs()
   try { fs.rmSync(path.join(SESSIONS_DIR, id), { recursive: true, force: true }) } catch (_) {}
   try { fs.rmSync(path.join(app.getPath('userData'), 'Partitions', 'wa-' + id), { recursive: true, force: true }) } catch (_) {}
@@ -696,24 +791,62 @@ ipcMain.handle('wa-multi:removeAccount', (e, id) => {
 ipcMain.handle('wa-multi:openAccount', (e, id) => openAccount(id))
 ipcMain.handle('wa-multi:parkAccount', (e, id) => parkAccount(id))
 
-ipcMain.handle('wa-multi:setPinned', (e, id) => {
+// Pin = the account stays ALIVE in the background (max 2: personal slot a +
+// second pin slot b). Pinning the account that already holds the target slot
+// is a no-op. Un-pin frees its slot (parks it).
+ipcMain.handle('wa-multi:setPinned', (e, arg) => {
+  const { id, on } = typeof arg === 'string' ? { id: arg, on: true } : (arg || {})
   const a = accounts.find(x => x.id === id)
   if (!a) return { ok: false, error: 'akun tidak ada' }
-  prefs.pinnedId = id
-  savePrefs()
-  // pinned account takes slot a; whoever held it moves to b (dual) or parks (solo)
-  showInSlot(id, 'a')
-  notifyStateChanged()
-  return { ok: true }
+  const isPersonal = prefs.pinnedId === id
+  const isPin2 = prefs.pin2Id === id
+
+  if (on === false) {
+    // unpin
+    if (isPersonal) {
+      prefs.pinnedId = null
+    } else if (isPin2) {
+      prefs.pin2Id = null
+      slotOf.delete(id)
+      destroyView(id)
+      if (activeAccountId === id) {
+        activeAccountId = views.size ? [...views.keys()][0] : null
+        if (activeAccountId) bringToFront(activeAccountId)
+      }
+    } else {
+      return { ok: false, error: 'akun ini gak ke-pin' }
+    }
+    savePrefs(); layoutViews(); notifyStateChanged()
+    return { ok: true }
+  }
+
+  // pin ON
+  if (isPersonal) return { ok: true } // already the personal pin
+  if (isPin2) return { ok: true }    // already the second pin
+  if (!prefs.pinnedId) {
+    prefs.pinnedId = id
+    savePrefs()
+    showInSlot(id, 'a')
+    notifyStateChanged()
+    return { ok: true }
+  }
+  if (!prefs.pin2Id) {
+    prefs.pin2Id = id
+    savePrefs()
+    showInSlot(id, 'b')
+    notifyStateChanged()
+    return { ok: true }
+  }
+  return { ok: false, error: 'maksimal 2 pin — lepas salah satu pin dulu (klik kanan tab → lepas pin)' }
 })
 
 ipcMain.handle('wa-multi:setTabMode', (e, mode) => {
   prefs.tabMode = mode === 'solo' ? 'solo' : 'dual'
   savePrefs()
   if (prefs.tabMode === 'solo') {
-    // park everything except the pinned account
+    // park everything except pinned accounts (personal + pin2)
     for (const id of [...views.keys()]) {
-      if (id !== prefs.pinnedId) destroyView(id)
+      if (id !== prefs.pinnedId && id !== prefs.pin2Id) destroyView(id)
     }
     if (!activeAccountId && prefs.pinnedId && views.has(prefs.pinnedId)) activeAccountId = prefs.pinnedId
   }
@@ -853,28 +986,43 @@ function parseCsv (text) {
 }
 
 ipcMain.handle('wa-multi:fetchContacts', async (e, accountId) => {
-  const w = await acquireWorker(accountId)
-  if (!w.ok) return { ok: false, error: w.error }
+  const w = await getFetchView(accountId)
+  if (!w.ok) return w
   const r = await fetchContacts(w.view)
   releaseWorker(accountId, w.temp)
   return r
 })
 
 ipcMain.handle('wa-multi:fetchGroups', async (e, accountId) => {
-  const w = await acquireWorker(accountId)
-  if (!w.ok) return { ok: false, error: w.error }
+  const w = await getFetchView(accountId)
+  if (!w.ok) return w
   const r = await fetchGroups(w.view)
   releaseWorker(accountId, w.temp)
   return r
 })
 
 ipcMain.handle('wa-multi:groupFromInvite', async (e, { accountId, link }) => {
-  const w = await acquireWorker(accountId)
-  if (!w.ok) return { ok: false, error: w.error }
+  const w = await getFetchView(accountId)
+  if (!w.ok) return w
   const r = await groupFromInvite(w.view, link)
   releaseWorker(accountId, w.temp)
   return r
 })
+
+// For contact/group fetching we only need an injected page — the account can
+// even be mid-login. No auth wait, so it never blocks; 10-min safety timeout.
+async function getFetchView (accountId) {
+  const existing = views.get(accountId)
+  const temp = !existing
+  const view = existing || createView(accountId)
+  if (temp) { slotOf.delete(accountId); view.setBounds({ x: 0, y: 0, width: 0, height: 0 }) }
+  const eng = await withTimeout(ensureEngine(view, 45000), 120000, 'injeksi mesin lama, coba lagi')
+  if (!eng || !eng.ok) {
+    if (temp) destroyView(accountId)
+    return { ok: false, error: (eng && eng.error) || 'gagal inject mesin blast' }
+  }
+  return { ok: true, view, temp }
+}
 
 // ── blast start / stop ────────────────────────────────────────
 ipcMain.handle('wa-multi:startBlast', async (e, cfg) => {
@@ -1038,11 +1186,12 @@ function runSelfTest () {
       check('pinned opens in slot a', slotOf.get(addA.id) === 'a', String(slotOf.get(addA.id)))
       check('pinned account has a live view', views.has(addA.id) === true)
 
-      // 4. dual mode: office opens alongside
+      // 4. dual mode: office opens as the active tab; personal pin stays alive
       await js(`window.waMulti.openAccount("${addB.id}")`)
       await wait(700)
-      check('office opens in slot b (dual)', slotOf.get(addB.id) === 'b', String(slotOf.get(addB.id)))
-      check('max 2 live views', views.size === 2, `n=${views.size}`)
+      check('office becomes active tab (no slot needed)', slotOf.get(addB.id) == null && activeAccountId === addB.id, `slot=${String(slotOf.get(addB.id))} active=${String(activeAccountId)}`)
+      check('personal pin stays alive in background', views.has(addA.id) === true)
+      check('max 2 live views (pin + active tab)', views.size === 2, `n=${views.size}`)
 
       // 4b. DEFAULT layout = full screen tab-by-tab (user requirement: no forced split)
       const baFull = views.get(addA.id).getBounds()
@@ -1065,7 +1214,21 @@ function runSelfTest () {
       const order = win.contentView.children.map(c => [...views.entries()].find(([, v]) => v === c)?.[0] || null)
       check('active view is on top of the stack', order[order.length - 1] === addA.id, JSON.stringify(order))
 
-      // 4d. split layout is an OPTION (kept for whoever wants side-by-side)
+      // 4e. second pin: stays alive in slot b; max 2 pins enforced
+      const pinB = await js(`window.waMulti.setPinned("${addB.id}", true)`)
+      check('second pin accepted', pinB.ok === true, JSON.stringify(pinB))
+      await wait(500)
+      check('pin2 lives in slot b', slotOf.get(addB.id) === 'b', String(slotOf.get(addB.id)))
+      check('pin2 stays alive', views.has(addB.id) === true)
+      const addC = await js('window.waMulti.addAccount("Toko C")')
+      const pinC = await js(`window.waMulti.setPinned("${addC.id}", true)`)
+      check('third pin rejected (max 2)', pinC.ok === false, JSON.stringify(pinC))
+      const unpinB = await js(`window.waMulti.setPinned("${addB.id}", false)`)
+      check('unpin frees slot b', unpinB.ok === true && slotOf.get(addB.id) == null && !views.has(addB.id), JSON.stringify({ slot: String(slotOf.get(addB.id)), alive: views.has(addB.id) }))
+      const repinB = await js(`window.waMulti.setPinned("${addB.id}", true)`)
+      check('re-pin after unpin works', repinB.ok === true && views.has(addB.id) === true)
+
+      // 4d. split layout is an OPTION (both pins alive → side-by-side)
       await js('window.waMulti.setLayoutMode("split")')
       await wait(400)
       const bs1 = views.get(addA.id).getBounds()
@@ -1078,8 +1241,8 @@ function runSelfTest () {
       // 5. solo mode parks the office account
       await js('window.waMulti.setTabMode("solo")')
       await wait(400)
-      check('solo mode parks office view', !views.has(addB.id), `n=${views.size}`)
-      check('solo keeps pinned alive', views.has(addA.id))
+      check('solo mode keeps both pins alive', views.has(addA.id) && views.has(addB.id), `n=${views.size}`)
+      check('solo keeps personal alive', views.has(addA.id))
       const bSolo = views.get(addA.id).getBounds()
       check('solo gives pinned full width', bSolo.width > 1000, JSON.stringify(bSolo))
       await js('window.waMulti.setTabMode("dual")')
@@ -1095,10 +1258,14 @@ function runSelfTest () {
       check('overlay close restores views', [...views.values()].every(v => v.getBounds().width > 100))
 
       // 7. park
+      const parkPin2 = await js(`window.waMulti.parkAccount("${addB.id}")`)
+      check('pin2 cannot be parked directly', parkPin2.ok === false, JSON.stringify(parkPin2))
+      await js(`window.waMulti.setPinned("${addB.id}", false)`)
+      await wait(300)
       await js(`window.waMulti.openAccount("${addB.id}")`)
       await wait(500)
       await js(`window.waMulti.parkAccount("${addB.id}")`)
-      check('parkAccount destroys office view', !views.has(addB.id))
+      check('parkAccount destroys parked view', !views.has(addB.id))
       const parkPinned = await js(`window.waMulti.parkAccount("${addA.id}")`)
       check('pinned account cannot be parked', parkPinned.ok === false, JSON.stringify(parkPinned))
 
@@ -1190,8 +1357,9 @@ function runSelfTest () {
       const noMsg = await js(`window.waMulti.startBlast({ kind:"personal", targets:[{phone:"628123"}], accounts:["${addA.id}"], message:"" })`)
       check('blast needs a message', noMsg.ok === false, JSON.stringify(noMsg))
 
-      // 17. remove account cleans up
+      // 17. remove account cleans up (B already parked & unpinned, C never opened)
       await js(`window.waMulti.removeAccount("${addB.id}")`)
+      await js(`window.waMulti.removeAccount("${addC.id}")`)
       check('removeAccount drops it', (await js('window.waMulti.getState()')).accounts.length === 1)
 
       // 18. dialogs (prompt() unsupported in Electron)

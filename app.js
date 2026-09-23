@@ -85,25 +85,43 @@ function renderTabs () {
   }
 }
 
+let ctxGen = 0
 function openCtxMenu (x, y, account) {
   closeCtxMenu()
-  window.waMulti.setOverlayOpen(true)
+  // paint order matters: ask main to hide WA views first, wait for the
+  // round-trip, THEN draw the menu — no frame where WA paints above the menu.
+  const gen = ++ctxGen
+  const ready = Promise.resolve(window.waMulti.setOverlayOpen(true)).catch(() => {})
   const m = document.createElement('div')
   m.className = 'acc-menu'
   m.style.position = 'fixed'
   m.style.left = Math.min(x, window.innerWidth - 220) + 'px'
   m.style.top = Math.min(y, window.innerHeight - 160) + 'px'
   m.style.minWidth = '200px'
+  const pinsUsed = state.accounts.filter(x => x.isPinned || x.isPin2).length
+  const canPinMore = pinsUsed < 2
+  const pinLabel = account.isPinned
+    ? '📌 Lepas pin (pribadi)'
+    : account.isPin2
+      ? '📌 Lepas pin (ke-2)'
+      : (canPinMore ? '📌 Pin ke-' + (pinsUsed + 1) + ' — tetap hidup di background' : '📌 Pin (penuh — lepas pin lain dulu)')
   m.innerHTML = `
-    <div class="acc-item" data-act="pin">${account.isPinned ? '📌 Lepas status pribadi' : '📌 Jadikan akun pribadi'}</div>
-    ${account.slot && !account.isPinned ? '<div class="acc-item" data-act="park">💤 Parkir tab ini</div>' : ''}
+    <div class="acc-item${!account.isPinned && !account.isPin2 && !canPinMore ? ' disabled' : ''}" data-act="pin">${pinLabel}</div>
+    ${account.slot && !account.isPinned && !account.isPin2 ? '<div class="acc-item" data-act="park">💤 Parkir tab ini</div>' : ''}
     <div class="acc-item" data-act="ren">✎ Ganti nama</div>
     <div class="acc-item" data-act="del">🗑 Hapus akun</div>`
   m.addEventListener('click', async (e) => {
     const act = e.target.closest('[data-act]')?.dataset.act
     if (!act) return
     closeCtxMenu()
-    if (act === 'pin') { await window.waMulti.setPinned(account.id); refreshState() }
+    if (act === 'pin') {
+      if (!account.isPinned && !account.isPin2 && state.accounts.filter(x => x.isPinned || x.isPin2).length >= 2) {
+        toast('maksimal 2 pin — lepas salah satu dulu')
+      } else {
+        await window.waMulti.setPinned(account.id, !(account.isPinned || account.isPin2))
+      }
+      refreshState()
+    }
     if (act === 'park') { await window.waMulti.parkAccount(account.id); refreshState() }
     if (act === 'ren') openRenameDialog(account.id, account.name)
     if (act === 'del') {
@@ -113,8 +131,11 @@ function openCtxMenu (x, y, account) {
       refreshState()
     }
   })
-  document.body.appendChild(m)
-  ctxMenu = m
+  ready.then(() => {
+    if (gen !== ctxGen) return   // a newer open/close superseded this menu
+    document.body.appendChild(m)
+    ctxMenu = m
+  })
 }
 let confirmArmed = null
 function confirm2 (menuEl, account) {
@@ -129,6 +150,7 @@ function confirm2 (menuEl, account) {
   return true
 }
 function closeCtxMenu () {
+  ctxGen++
   if (ctxMenu) { ctxMenu.remove(); ctxMenu = null }
   if (currentView === 'chat' && !document.querySelector('dialog[open]')) window.waMulti.setOverlayOpen(false)
 }
@@ -138,6 +160,7 @@ function switchView (v) {
   currentView = v
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === v))
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'view-' + v))
+  if (v === 'blast') { fillAccSelect($('contactAccSel')); fillAccSelect($('groupAccSel')) }
   window.waMulti.setOverlayOpen(v !== 'chat')
   syncStage()
 }
@@ -233,6 +256,60 @@ function fillAccSelect (sel) {
   }
 }
 
+// contact picker: full list lives in a pool; UI renders per-batch of 7 with
+// live name/number search + "pilih semua hasil" (checked state = targets array)
+let contactPool = []
+let contactShown = 7
+const PICK_BATCH = 7
+
+function filteredContacts () {
+  const f = ($('contactSearch').value || '').trim().toLowerCase()
+  if (!f) return contactPool
+  return contactPool.filter(c =>
+    (c.name || '').toLowerCase().includes(f) || String(c.id).replace(/@.*$/, '').includes(f))
+}
+
+function renderContactBatch () {
+  const box = $('contactPick')
+  const list = filteredContacts()
+  box.innerHTML = ''
+  if (!contactPool.length) { box.innerHTML = '<div class="sub small">klik "Ambil kontak" dulu</div>'; return }
+  if (!list.length) { box.innerHTML = '<div class="sub small">gak ada yang cocok</div>'; return }
+  const slice = list.slice(0, contactShown)
+  slice.forEach(c => {
+    const phone = String(c.id).replace(/@.*$/, '')
+    const checked = targets.some(t => t.phone === phone)
+    const row = document.createElement('label')
+    row.className = 'mini-item' + (checked ? ' on' : '')
+    row.innerHTML = `<input type="checkbox" ${checked ? 'checked' : ''} /><span class="mn">${esc(c.name || phone)}</span><span class="mp">${esc(phone)}</span>`
+    row.querySelector('input').addEventListener('change', (e) => {
+      const on = e.target.checked
+      row.classList.toggle('on', on)
+      if (on) addTargets([{ name: c.name || phone, phone }])
+      else { targets = targets.filter(t => t.phone !== phone); renderTargetSummary() }
+    })
+    box.appendChild(row)
+  })
+  const rest = list.length - slice.length
+  const foot = document.createElement('div')
+  foot.className = 'mini-foot'
+  foot.innerHTML = `<span class="sub small">${slice.length}/${list.length} ditampilkan</span>` +
+    (rest > 0 ? `<button class="link-btn" data-more>tampilin ${Math.min(PICK_BATCH, rest)} lagi</button>` : '') +
+    `<button class="link-btn" data-all>pilih semua hasil (${list.length})</button>`
+  foot.querySelector('[data-more]')?.addEventListener('click', () => { contactShown += PICK_BATCH; renderContactBatch() })
+  foot.querySelector('[data-all]')?.addEventListener('click', () => {
+    const have = new Set(targets.filter(t => t.phone).map(t => t.phone))
+    const add = list.map(c => String(c.id).replace(/@.*$/, '')).filter(p => !have.has(p))
+      .map((p, i) => ({ name: (list.find(c => String(c.id).replace(/@.*$/, '') === p) || {}).name || p, phone: p }))
+    addTargets(add)
+    renderContactBatch()
+    toast(`${add.length} kontak ditambah ke target`)
+  })
+  box.appendChild(foot)
+}
+
+$('contactSearch').addEventListener('input', () => { contactShown = PICK_BATCH; renderContactBatch() })
+
 $('btnFetchContacts').addEventListener('click', async () => {
   const id = $('contactAccSel').value
   if (!id) return toast('pilih akun dulu')
@@ -241,24 +318,59 @@ $('btnFetchContacts').addEventListener('click', async () => {
   const r = await window.waMulti.fetchContacts(id)
   btn.disabled = false; btn.textContent = 'Ambil kontak'
   if (!r.ok) return toast('gagal: ' + r.error)
-  const box = $('contactPick')
+  contactPool = r.contacts || []
+  contactShown = PICK_BATCH
+  renderContactBatch()
+  toast(`${contactPool.length} kontak diambil`)
+})
+
+let groupPool = []
+let groupShown = PICK_BATCH
+
+function filteredGroups () {
+  const f = ($('groupSearch').value || '').trim().toLowerCase()
+  if (!f) return groupPool
+  return groupPool.filter(g => (g.name || '').toLowerCase().includes(f) || String(g.id).includes(f))
+}
+
+function renderGroupBatch () {
+  const box = $('groupPick')
+  const list = filteredGroups()
   box.innerHTML = ''
-  if (!r.contacts.length) { box.innerHTML = '<div class="sub small">kontak kosong</div>'; return }
-  r.contacts.forEach(c => {
-    const phone = String(c.id).replace(/@.*$/, '')
+  if (!groupPool.length) { box.innerHTML = '<div class="sub small">klik "Ambil daftar grup" dulu</div>'; return }
+  if (!list.length) { box.innerHTML = '<div class="sub small">gak ada yang cocok</div>'; return }
+  const slice = list.slice(0, groupShown)
+  slice.forEach(g => {
+    const checked = targets.some(t => t.jid === g.id)
     const row = document.createElement('label')
-    row.className = 'mini-item'
-    row.innerHTML = `<input type="checkbox" /><span class="mn">${esc(c.name || phone)}</span><span class="mp">${esc(phone)}</span>`
-    const cb = row.querySelector('input')
-    cb.addEventListener('change', () => {
-      row.classList.toggle('on', cb.checked)
-      if (cb.checked) addTargets([{ name: c.name || phone, phone }])
-      else { targets = targets.filter(t => t.phone !== phone); renderTargetSummary() }
+    row.className = 'mini-item' + (checked ? ' on' : '')
+    row.innerHTML = `<input type="checkbox" ${checked ? 'checked' : ''} /><span class="mn">${esc(g.name || g.id)}</span>`
+    row.querySelector('input').addEventListener('change', (e) => {
+      const on = e.target.checked
+      row.classList.toggle('on', on)
+      if (on) addTargets([{ name: g.name || g.id, jid: g.id }])
+      else { targets = targets.filter(t => t.jid !== g.id); renderTargetSummary() }
     })
     box.appendChild(row)
   })
-  toast(`${r.contacts.length} kontak diambil`)
-})
+  const rest = list.length - slice.length
+  const foot = document.createElement('div')
+  foot.className = 'mini-foot'
+  foot.innerHTML = `<span class="sub small">${slice.length}/${list.length} ditampilkan</span>` +
+    (rest > 0 ? `<button class="link-btn" data-more>tampilin ${Math.min(PICK_BATCH, rest)} lagi</button>` : '') +
+    `<button class="link-btn" data-all>pilih semua hasil (${list.length})</button>`
+  foot.querySelector('[data-more]')?.addEventListener('click', () => { groupShown += PICK_BATCH; renderGroupBatch() })
+  foot.querySelector('[data-all]')?.addEventListener('click', () => {
+    const have = new Set(targets.filter(t => t.jid).map(t => t.jid))
+    const add = list.filter(g => !have.has(g.id)).map(g => ({ name: g.name || g.id, jid: g.id }))
+    addTargets(add)
+    renderGroupBatch()
+    toast(`${add.length} grup ditambah ke target`)
+  })
+  box.appendChild(foot)
+}
+
+$('groupSearch').addEventListener('input', () => { groupShown = PICK_BATCH; renderGroupBatch() })
 
 $('btnFetchGroups').addEventListener('click', async () => {
   const id = $('groupAccSel').value
@@ -268,22 +380,10 @@ $('btnFetchGroups').addEventListener('click', async () => {
   const r = await window.waMulti.fetchGroups(id)
   btn.disabled = false; btn.textContent = 'Ambil daftar grup'
   if (!r.ok) return toast('gagal: ' + r.error)
-  const box = $('groupPick')
-  box.innerHTML = ''
-  if (!r.groups.length) { box.innerHTML = '<div class="sub small">gak ada grup</div>'; return }
-  r.groups.forEach(g => {
-    const row = document.createElement('label')
-    row.className = 'mini-item'
-    row.innerHTML = `<input type="checkbox" /><span class="mn">${esc(g.name || g.id)}</span>`
-    const cb = row.querySelector('input')
-    cb.addEventListener('change', () => {
-      row.classList.toggle('on', cb.checked)
-      if (cb.checked) addTargets([{ name: g.name || g.id, jid: g.id }])
-      else { targets = targets.filter(t => t.jid !== g.id); renderTargetSummary() }
-    })
-    box.appendChild(row)
-  })
-  toast(`${r.groups.length} grup diambil`)
+  groupPool = r.groups || []
+  groupShown = PICK_BATCH
+  renderGroupBatch()
+  toast(`${groupPool.length} grup diambil`)
 })
 
 $('btnAddInvite').addEventListener('click', async () => {
@@ -438,8 +538,13 @@ window.waMulti.onBlastProgress((p) => {
     renderProg()
   } else if (p.phase === 'accountStart') {
     const e = prog.get(p.accountId)
-    if (e) { e.status = 'jalan'; e.total = p.total }
+    if (e) { e.status = p.status || 'nyalain'; e.total = p.total }
     logLine(`▶ ${p.name} mulai (${p.total} target)`)
+    renderProg()
+  } else if (p.phase === 'accountWait') {
+    const e = prog.get(p.accountId)
+    if (e) e.status = `nyalain… ${p.elapsedSec}s`
+    logLine(`⏳ ${p.name} belum siap (${p.elapsedSec}s) — nunggu login`, false, true)
     renderProg()
   } else if (p.phase === 'progress') {
     const e = prog.get(p.accountId)
