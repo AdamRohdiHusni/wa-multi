@@ -29,6 +29,11 @@ const WAJS_BUNDLE = fs.readFileSync(path.join(__dirname, 'vendor', 'wppconnect-w
 function ensureDirs () {
   for (const d of [userDataDir, SESSIONS_DIR, TMP_DIR]) fs.mkdirSync(d, { recursive: true })
 }
+// the self-test must always start from a clean slate, otherwise leftovers from a
+// previous run break the persistence assertions (counts, "removed" accounts, etc.)
+if (process.env.WA_MULTI_SELFTEST) {
+  try { fs.rmSync(userDataDir, { recursive: true, force: true }) } catch (_) {}
+}
 ensureDirs()
 
 // ── Stores ────────────────────────────────────────────────────
