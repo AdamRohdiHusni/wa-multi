@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('waMulti', {
   setPinned: (id) => ipcRenderer.invoke('wa-multi:setPinned', id),
   // prefs
   setTabMode: (mode) => ipcRenderer.invoke('wa-multi:setTabMode', mode),
+  setLayoutMode: (mode) => ipcRenderer.invoke('wa-multi:setLayoutMode', mode),
+  activateAccount: (id) => ipcRenderer.invoke('wa-multi:activateAccount', id),
   setTheme: (theme) => ipcRenderer.invoke('wa-multi:setTheme', theme),
   setDailyCap: (cap) => ipcRenderer.invoke('wa-multi:setDailyCap', cap),
   setUITop: (top) => ipcRenderer.invoke('wa-multi:setUITop', top),

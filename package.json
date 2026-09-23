@@ -1,8 +1,8 @@
 {
   "name": "wa-multi",
   "productName": "WA Multi",
-  "version": "2.0.0",
-  "description": "Multi-account WhatsApp Web desktop: 2 live tabs + multi-account blast (personal & groups) with scheduling",
+  "version": "2.1.0",
+  "description": "Multi-account WhatsApp Web desktop: instant tab-by-tab (or split) multi-account blast (personal & groups) with scheduling",
   "main": "main.js",
   "author": "Suki",
   "license": "MIT",

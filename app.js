@@ -2,7 +2,7 @@
 const $ = (id) => document.getElementById(id)
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 
-let state = { accounts: [], pinnedId: null, tabMode: 'dual', theme: 'dark', dailyCap: 40, schedules: [], blasting: false, history: [] }
+let state = { accounts: [], pinnedId: null, tabMode: 'dual', layoutMode: 'full', activeAccountId: null, theme: 'dark', dailyCap: 40, schedules: [], blasting: false, history: [] }
 const unreadMap = new Map()          // accountId -> unread count
 let currentView = 'chat'             // chat | blast | schedule
 
@@ -40,7 +40,10 @@ async function refreshState () {
 }
 
 function renderTabMode () {
-  document.querySelectorAll('.tm-opt').forEach(b => b.classList.toggle('active', b.dataset.mode === state.tabMode))
+  document.querySelectorAll('#tabMode .tm-opt').forEach(b => b.classList.toggle('active', b.dataset.mode === state.tabMode))
+  document.querySelectorAll('#layoutSeg .lay-opt').forEach(b => b.classList.toggle('active', b.dataset.layout === (state.layoutMode || 'full')))
+  // layout switch only matters with 2 tabs
+  $('layoutSeg').style.display = state.tabMode === 'dual' ? '' : 'none'
 }
 
 function syncStage () {
@@ -55,21 +58,26 @@ function renderTabs () {
   const wrap = $('tabs')
   wrap.innerHTML = ''
   for (const a of state.accounts) {
+    const isActive = state.activeAccountId === a.id && a.slot
     const t = document.createElement('div')
-    t.className = 'tab' + (a.slot ? ' on' : '')
+    t.className = 'tab' + (a.slot ? ' on' : '') + (isActive ? ' active' : '')
     const unread = unreadMap.get(a.id) || 0
     t.innerHTML = `
       <span class="tdot" style="background:${a.color || 'var(--accent)'}"></span>
       ${a.isPinned ? '<span class="pin" title="Akun pribadi">📌</span>' : ''}
       <span class="tname">${esc(a.name)}</span>
-      ${unread ? `<span class="tbadge">${unread}</span>` : ''}
-      ${a.slot === 'b' ? '<span class="tbadge" title="nyala di slot 2">2</span>' : ''}`
-    t.title = a.slot ? `${a.name} — nyala (klik buat parkir)` : `${a.name} — parkir (klik buat nyalain)`
+      ${unread ? `<span class="tbadge">${unread}</span>` : ''}`
+    t.title = a.slot
+      ? (isActive ? `${a.name} — lagi dibuka` : `${a.name} — hidup di background (klik = langsung pindah, tanpa loading)`)
+      : `${a.name} — parkir (klik buat nyalain)`
     t.addEventListener('click', async () => {
       closeCtxMenu()
       switchView('chat')
-      if (a.slot) await window.waMulti.parkAccount(a.id)
-      else await window.waMulti.openAccount(a.id)
+      if (a.slot && state.activeAccountId !== a.id) {
+        await window.waMulti.activateAccount(a.id)   // instant switch, no reload
+      } else if (!a.slot) {
+        await window.waMulti.openAccount(a.id)       // spin up (QR first time)
+      }
       refreshState()
     })
     t.addEventListener('contextmenu', (e) => { e.preventDefault(); openCtxMenu(e.clientX, e.clientY, a) })
@@ -88,6 +96,7 @@ function openCtxMenu (x, y, account) {
   m.style.minWidth = '200px'
   m.innerHTML = `
     <div class="acc-item" data-act="pin">${account.isPinned ? '📌 Lepas status pribadi' : '📌 Jadikan akun pribadi'}</div>
+    ${account.slot && !account.isPinned ? '<div class="acc-item" data-act="park">💤 Parkir tab ini</div>' : ''}
     <div class="acc-item" data-act="ren">✎ Ganti nama</div>
     <div class="acc-item" data-act="del">🗑 Hapus akun</div>`
   m.addEventListener('click', async (e) => {
@@ -95,6 +104,7 @@ function openCtxMenu (x, y, account) {
     if (!act) return
     closeCtxMenu()
     if (act === 'pin') { await window.waMulti.setPinned(account.id); refreshState() }
+    if (act === 'park') { await window.waMulti.parkAccount(account.id); refreshState() }
     if (act === 'ren') openRenameDialog(account.id, account.name)
     if (act === 'del') {
       if (!confirm2(m, account)) return
@@ -320,6 +330,7 @@ function collectCfg () {
     kind: targetKind,
     targets,
     message: $('blastMsg').value,
+    custom: $('customInput').value.trim(),
     media,
     accounts: [...blastSel],
     delaySec: Number($('delaySec').value) || 30,
@@ -582,7 +593,18 @@ $('tabMode').addEventListener('click', async (e) => {
   await window.waMulti.setTabMode(b.dataset.mode)
   refreshState()
 })
+$('layoutSeg').addEventListener('click', async (e) => {
+  const b = e.target.closest('.lay-opt')
+  if (!b) return
+  await window.waMulti.setLayoutMode(b.dataset.layout)
+  refreshState()
+})
 document.addEventListener('click', (e) => { if (ctxMenu && !e.target.closest('.acc-menu')) closeCtxMenu() })
+// v1 bug hardening: a stray click (mis-click onto the WA web area while a menu is
+// open) must ALWAYS close the menu cleanly. mousedown runs before the click can
+// fall through anywhere, and window blur (alt-tab / click outside app) closes too.
+document.addEventListener('mousedown', (e) => { if (ctxMenu && !e.target.closest('.acc-menu')) closeCtxMenu() }, true)
+window.addEventListener('blur', () => { if (ctxMenu) closeCtxMenu() })
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCtxMenu() })
 
 window.waMulti.onStateChanged(() => refreshState())

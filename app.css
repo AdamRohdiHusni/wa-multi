@@ -110,6 +110,9 @@ body {
 }
 .tab:hover { opacity: 1; border-color: var(--fg2); }
 .tab.on { opacity: 1; color: var(--fg); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--bg)); }
+.tab.active { border-color: var(--accent); box-shadow: 0 0 0 1.5px var(--accent) inset; opacity: 1; }
+.tab:not(.on) .tname { color: var(--fg2); }
+.lay-opt { width: auto; padding: 0 9px; font-weight: 600; font-size: 11.5px; }
 .tab .pin { font-size: 11px; }
 .tab .tdot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
 .tab .tname { overflow: hidden; text-overflow: ellipsis; }

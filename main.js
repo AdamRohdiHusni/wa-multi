@@ -22,6 +22,10 @@ const TMP_DIR = path.join(userDataDir, 'tmp')
 app.commandLine.appendSwitch('disable-gpu') // lightweight on weak laptops
 app.commandLine.appendSwitch('disable-software-rasterizer')
 app.commandLine.appendSwitch('disable-renderer-backgrounding')
+// keep background tabs REAL-TIME: stop Chromium from freezing/occlusion-throttling
+// the stacked (non-front) WA view in full layout mode
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 
 const CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
 const WAJS_BUNDLE = fs.readFileSync(path.join(__dirname, 'vendor', 'wppconnect-wa.js'), 'utf8')
@@ -62,6 +66,7 @@ const saveHistory = () => writeJson(HISTORY_FILE, history)
 
 // prefs defaults
 if (!prefs.tabMode) prefs.tabMode = 'dual'   // 'dual' = pinned + 1 office | 'solo' = pinned only
+if (!prefs.layoutMode) prefs.layoutMode = 'full' // 'full' = tab-by-tab full screen (bg stays alive) | 'split' = kiri-kanan
 if (!prefs.theme) prefs.theme = 'dark'
 if (typeof prefs.dailyCap !== 'number') prefs.dailyCap = 40
 if (!prefs.pinnedId) prefs.pinnedId = null
@@ -156,6 +161,7 @@ const slotOf = new Map()       // accountId -> 'a' | 'b'
 const engines = new Map()      // accountId -> { injected: bool, promise }
 let uiTop = 88
 let overlayOpen = false
+let activeAccountId = null     // which alive view is shown on top (full layout) / focused
 
 function stageRect () {
   if (!win) return { x: 0, y: 0, width: 0, height: 0 }
@@ -163,20 +169,34 @@ function stageRect () {
   return { x: 0, y: uiTop, width: b.width, height: Math.max(1, b.height - uiTop) }
 }
 
-function viewBounds (accountId) {
-  if (!win) return { x: 0, y: 0, width: 0, height: 0 }
-  if (overlayOpen) return { x: 0, y: 0, width: 0, height: 0 }
+function FULL () {
   const r = stageRect()
-  const slot = slotOf.get(accountId)
-  if (!slot) return { x: 0, y: 0, width: 0, height: 0 } // parked (alive but not on stage)
-  const dual = prefs.tabMode === 'dual' && slotOf.size > 0 && hasSlot('b')
-  if (slot === 'b' || (dual && slot === 'a')) {
+  return { x: 0, y: r.y, width: r.width, height: r.height }
+}
+const HIDDEN = { x: 0, y: 0, width: 0, height: 0 }
+
+function viewBounds (accountId) {
+  if (!win || overlayOpen || !slotOf.has(accountId)) return HIDDEN
+  const r = stageRect()
+  // split layout only applies in dual tab mode when two slots are actually occupied
+  if (prefs.tabMode === 'dual' && prefs.layoutMode === 'split' && hasSlot('b')) {
     const half = Math.floor(r.width / 2)
-    return slot === 'a'
+    return slotOf.get(accountId) === 'a'
       ? { x: 0, y: r.y, width: half, height: r.height }
       : { x: half, y: r.y, width: r.width - half, height: r.height }
   }
-  return { x: 0, y: r.y, width: r.width, height: r.height }
+  return FULL() // tab-by-tab: every alive view covers the full stage; z-order decides who is visible
+}
+
+// raise a view above the others (instant, no reload — the page never left memory)
+function bringToFront (accountId) {
+  const v = views.get(accountId)
+  if (!v || !win) return
+  try {
+    win.contentView.removeChildView(v)
+    win.contentView.addChildView(v)
+    v.setBounds(viewBounds(accountId))
+  } catch (_) {}
 }
 
 function hasSlot (slot) {
@@ -228,6 +248,13 @@ function destroyView (accountId) {
   views.delete(accountId)
   slotOf.delete(accountId)
   engines.delete(accountId)
+  if (activeAccountId === accountId) {
+    activeAccountId = null
+    for (const id of views.keys()) {
+      if (id === prefs.pinnedId) { activeAccountId = id; break }
+    }
+    if (!activeAccountId && views.size) activeAccountId = [...views.keys()][0]
+  }
 }
 
 // Assign an account to a stage slot and make sure a view exists for it
@@ -254,6 +281,8 @@ function showInSlot (accountId, slot) {
   acc.lastOpened = Date.now()
   saveAccounts()
   layoutViews()
+  activeAccountId = accountId
+  bringToFront(accountId)
   notifyStateChanged()
   return { ok: true, slot }
 }
@@ -269,6 +298,8 @@ function openAccount (accountId) {
 function parkAccount (accountId) {
   if (prefs.pinnedId === accountId) return { ok: false, error: 'akun pribadi gak bisa diparkir' }
   destroyView(accountId)
+  if (!activeAccountId && views.size) activeAccountId = [...views.keys()][0]
+  if (activeAccountId) bringToFront(activeAccountId)
   notifyStateChanged()
   return { ok: true }
 }
@@ -393,6 +424,20 @@ async function sendFile (view, jid, file, caption) {
 
 const wait = (ms) => new Promise(r => setTimeout(r, ms))
 
+// Resolve per-target placeholders. {custom} falls back to the blast-level custom
+// text, so you can either give every target its own value (CSV column) or one
+// value for all (the "custom" field in the UI).
+function resolveMessage (template, target, fallbackCustom) {
+  const custom = (target && target.custom) || fallbackCustom || ''
+  return String(template || '')
+    .replace(/\{nama\}/gi, (target && target.name) || '')
+    .replace(/\{name\}/gi, (target && target.name) || '')
+    .replace(/\{nomor\}/gi, (target && (target.phone || target.jid)) || '')
+    .replace(/\{phone\}/gi, (target && (target.phone || target.jid)) || '')
+    .replace(/\{custom\}/gi, custom)
+    .replace(/\{kustom\}/gi, custom)
+}
+
 // ── Daily send counters (per account) ─────────────────────────
 function todayKey () { return new Date().toISOString().slice(0, 10) }
 function sentToday (accountId) {
@@ -484,10 +529,11 @@ async function runBlastJob (job) {
       }
 
       const jid = job.kind === 'group' ? t.jid : (t.jid || toJid(t.phone))
+      const text = resolveMessage(job.message, t, job.custom)
       let res
       if (!jid) res = { ok: false, error: 'nomor tidak valid' }
-      else if (job.media) res = await sendFile(w.view, jid, job.media, job.message)
-      else res = await sendText(w.view, jid, job.message)
+      else if (job.media) res = await sendFile(w.view, jid, job.media, text)
+      else res = await sendText(w.view, jid, text)
 
       if (res.ok) {
         sent++
@@ -498,7 +544,7 @@ async function runBlastJob (job) {
       }
       emitProgress({
         phase: 'progress', jobId: job.id, accountId, name: accName,
-        index: i + 1, total: slice.length, target: t.name || t.phone || t.jid,
+        index: i + 1, total: slice.length, target: t.name || t.phone || t.jid, custom: t.custom || null,
         status: res.ok ? 'sent' : 'failed', error: res.error || null, sent, failed
       })
 
@@ -525,6 +571,7 @@ function recordHistory (job, accountId, accName, target, status, error) {
     accountName: accName,
     target: target.name || target.phone || target.jid,
     jid: target.jid || toJid(target.phone) || null,
+    custom: target.custom || null,
     status,
     error: error || null
   })
@@ -578,6 +625,7 @@ function startBlastFromSchedule (s) {
     kind: s.kind,
     targets: s.targets,
     message: s.message,
+    custom: s.custom || '',
     media: s.media || null,
     accounts: s.accounts,
     delaySec: s.delaySec,
@@ -606,6 +654,8 @@ ipcMain.handle('wa-multi:getState', () => ({
   })),
   pinnedId: prefs.pinnedId,
   tabMode: prefs.tabMode,
+  layoutMode: prefs.layoutMode,
+  activeAccountId,
   dailyCap: prefs.dailyCap,
   theme: prefs.theme,
   schedules: schedules.map(s => ({
@@ -665,8 +715,10 @@ ipcMain.handle('wa-multi:setTabMode', (e, mode) => {
     for (const id of [...views.keys()]) {
       if (id !== prefs.pinnedId) destroyView(id)
     }
+    if (!activeAccountId && prefs.pinnedId && views.has(prefs.pinnedId)) activeAccountId = prefs.pinnedId
   }
   layoutViews()
+  if (activeAccountId) bringToFront(activeAccountId)
   notifyStateChanged()
   return { ok: true, tabMode: prefs.tabMode }
 })
@@ -683,6 +735,23 @@ ipcMain.handle('wa-multi:setDailyCap', (e, cap) => {
   prefs.dailyCap = Math.max(0, Number(cap) || 0)
   savePrefs(); notifyStateChanged()
   return { ok: true, dailyCap: prefs.dailyCap }
+})
+
+ipcMain.handle('wa-multi:setLayoutMode', (e, mode) => {
+  prefs.layoutMode = mode === 'split' ? 'split' : 'full'
+  savePrefs()
+  layoutViews()
+  if (prefs.layoutMode === 'full' && activeAccountId) bringToFront(activeAccountId)
+  notifyStateChanged()
+  return { ok: true, layoutMode: prefs.layoutMode }
+})
+
+ipcMain.handle('wa-multi:activateAccount', (e, id) => {
+  if (!views.has(id)) return { ok: false, error: 'tab belum nyala' }
+  activeAccountId = id
+  bringToFront(id)
+  notifyStateChanged()
+  return { ok: true }
 })
 
 ipcMain.handle('wa-multi:setUITop', (e, top) => {
@@ -765,6 +834,9 @@ function parseCsv (text) {
   const hasHeader = header.some(h => /nama|name|phone|nomor|no_?hp|telepon|whatsapp|wa/.test(h))
   const idxPhone = hasHeader ? header.findIndex(h => /phone|nomor|no_?hp|telepon|whatsapp|wa|hp/.test(h)) : -1
   const idxName = hasHeader ? header.findIndex(h => /nama|name|kreator|creator/.test(h)) : -1
+  // {custom} column: anything the sender wants to inject per target
+  // (link affiliate, kode voucher, catatan pribadi, dst.)
+  const idxCustom = hasHeader ? header.findIndex(h => /custom|kustom|catatan|note|pesan|link|aff|voucher|kode/.test(h)) : -1
   const body = hasHeader ? lines.slice(1) : lines
   const rows = []
   for (const line of body) {
@@ -774,7 +846,8 @@ function parseCsv (text) {
     if (!phone) continue
     const digits = normalizePhone(phone)
     if (!digits) continue
-    rows.push({ name: String(name || '').trim() || digits, phone: digits })
+    const custom = idxCustom >= 0 ? String(cells[idxCustom] || '').trim() : ''
+    rows.push({ name: String(name || '').trim() || digits, phone: digits, custom })
   }
   return rows
 }
@@ -809,7 +882,8 @@ ipcMain.handle('wa-multi:startBlast', async (e, cfg) => {
   const targets = (cfg.targets || []).map(t => ({
     jid: t.jid || null,
     phone: t.phone || null,
-    name: t.name || t.phone || t.jid || ''
+    name: t.name || t.phone || t.jid || '',
+    custom: t.custom || ''
   })).filter(t => t.jid || t.phone)
   if (!targets.length) return { ok: false, error: 'target kosong' }
   if (!cfg.accounts || !cfg.accounts.length) return { ok: false, error: 'pilih minimal 1 akun' }
@@ -821,6 +895,7 @@ ipcMain.handle('wa-multi:startBlast', async (e, cfg) => {
     kind: cfg.kind === 'group' ? 'group' : 'personal',
     targets,
     message: String(cfg.message || ''),
+    custom: String(cfg.custom || ''),
     media: cfg.media || null,
     accounts: cfg.accounts,
     delaySec: Math.max(5, Number(cfg.delaySec) || 30),
@@ -850,8 +925,9 @@ ipcMain.handle('wa-multi:addSchedule', (e, cfg) => {
     label: cfg.label || (cfg.kind === 'group' ? 'Blast Grup' : 'Blast Personal'),
     kind: cfg.kind === 'group' ? 'group' : 'personal',
     when,
-    targets: (cfg.targets || []).map(t => ({ jid: t.jid || null, phone: t.phone || null, name: t.name || t.phone || t.jid || '' })).filter(t => t.jid || t.phone),
+    targets: (cfg.targets || []).map(t => ({ jid: t.jid || null, phone: t.phone || null, name: t.name || t.phone || t.jid || '', custom: t.custom || '' })).filter(t => t.jid || t.phone),
     message: String(cfg.message || ''),
+    custom: String(cfg.custom || ''),
     media: cfg.media || null,
     accounts: cfg.accounts || [],
     delaySec: Math.max(5, Number(cfg.delaySec) || 30),
@@ -908,6 +984,30 @@ setInterval(() => {
   }
 }, 4000)
 
+// ── Test hook (only when explicitly enabled) ──────────────────
+// lets a probe replace the WA page with a mock so the whole blast pipeline
+// (rotation, placeholders, delay, daily cap, history) can be verified without
+// a real logged-in WhatsApp session.
+if (process.env.WA_MULTI_TESTHOOK) {
+  global.__wa = {
+    get views () { return views },
+    get slotOf () { return slotOf },
+    get accounts () { return accounts },
+    get history () { return history },
+    get prefs () { return prefs },
+    get activeJob () { return activeJob },
+    set accounts (v) { accounts = v },
+    resolveMessage,
+    normalizePhone,
+    splitTargets,
+    toJid,
+    sentToday,
+    recordHistory,
+    saveAccounts,
+    saveHistory
+  }
+}
+
 // ── Self-test harness ─────────────────────────────────────────
 function runSelfTest () {
   const results = []
@@ -942,10 +1042,38 @@ function runSelfTest () {
       await js(`window.waMulti.openAccount("${addB.id}")`)
       await wait(700)
       check('office opens in slot b (dual)', slotOf.get(addB.id) === 'b', String(slotOf.get(addB.id)))
-      const ba = views.get(addA.id).getBounds()
-      const bb = views.get(addB.id).getBounds()
-      check('two views side by side', ba.width > 100 && bb.width > 100 && bb.x >= ba.width - 2, `a=${ba.width} b.x=${bb.x}`)
       check('max 2 live views', views.size === 2, `n=${views.size}`)
+
+      // 4b. DEFAULT layout = full screen tab-by-tab (user requirement: no forced split)
+      const baFull = views.get(addA.id).getBounds()
+      const bbFull = views.get(addB.id).getBounds()
+      check('default layout is full', prefs.layoutMode === 'full', String(prefs.layoutMode))
+      check('full layout: no split (both full width)',
+        baFull.width > 1000 && bbFull.width > 1000 && baFull.x === 0 && bbFull.x === 0,
+        `a=${baFull.width}@${baFull.x} b=${bbFull.width}@${bbFull.x}`)
+      check('newly opened account becomes active', activeAccountId === addB.id, String(activeAccountId))
+
+      // 4c. background tab STAYS ALIVE and is NOT reloaded when switching (instant switch)
+      await views.get(addA.id).webContents.executeJavaScript('window.__keep = 4242')
+      await js(`window.waMulti.activateAccount("${addA.id}")`)
+      await wait(400)
+      check('activateAccount sets active', activeAccountId === addA.id, String(activeAccountId))
+      check('background view stays alive after switch', views.has(addB.id) === true)
+      check('background page not reloaded (marker intact)',
+        (await views.get(addA.id).webContents.executeJavaScript('window.__keep')) === 4242)
+      // active view must be the topmost child so it is actually visible
+      const order = win.contentView.children.map(c => [...views.entries()].find(([, v]) => v === c)?.[0] || null)
+      check('active view is on top of the stack', order[order.length - 1] === addA.id, JSON.stringify(order))
+
+      // 4d. split layout is an OPTION (kept for whoever wants side-by-side)
+      await js('window.waMulti.setLayoutMode("split")')
+      await wait(400)
+      const bs1 = views.get(addA.id).getBounds()
+      const bs2 = views.get(addB.id).getBounds()
+      check('split layout: side by side', bs1.width > 100 && bs2.width > 100 && bs2.x >= bs1.width - 2, `a=${bs1.width} b.x=${bs2.x}`)
+      await js('window.waMulti.setLayoutMode("full")')
+      await wait(300)
+      check('layout mode persisted', JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')).layoutMode === 'full')
 
       // 5. solo mode parks the office account
       await js('window.waMulti.setTabMode("solo")')
@@ -990,6 +1118,26 @@ function runSelfTest () {
       const csv2 = parseCsv('nama;nomor\nbudi;628123456789\n')
       check('csv detects semicolon delimiter', csv2.length === 1 && csv2[0].phone === '628123456789', JSON.stringify(csv2))
 
+      // 9b. {custom} placeholders
+      check('resolveMessage {nama}',
+        resolveMessage('Hai {nama}!', { name: 'Budi' }, '') === 'Hai Budi!',
+        resolveMessage('Hai {nama}!', { name: 'Budi' }, ''))
+      check('resolveMessage {nomor}',
+        resolveMessage('no {nomor}', { phone: '628123' }, '') === 'no 628123')
+      check('resolveMessage {custom} from target wins',
+        resolveMessage('link: {custom}', { custom: 'aff-A' }, 'fallback') === 'link: aff-A')
+      check('resolveMessage {custom} falls back to blast-level',
+        resolveMessage('link: {custom}', { name: 'x' }, 'aff-B') === 'link: aff-B')
+      check('resolveMessage {custom} empty when nothing set',
+        resolveMessage('link: {custom}', {}, '') === 'link: ')
+      check('resolveMessage leaves unknown braces alone',
+        resolveMessage('{harga} tetap', { name: 'a' }, '') === '{harga} tetap')
+      const csvC = parseCsv('nama,phone,custom\nbudi,6281234567890,https://aff/1\nsari,6281234567891,\n')
+      check('csv reads custom column', csvC[0] && csvC[0].custom === 'https://aff/1', JSON.stringify(csvC[0]))
+      check('csv custom empty when blank', csvC[1] && csvC[1].custom === '', JSON.stringify(csvC[1]))
+      const csvC2 = parseCsv('nama,nomor,link aff\nbudi,6281234567892,https://aff/9\n')
+      check('csv detects "link aff" header as custom', csvC2[0] && csvC2[0].custom === 'https://aff/9', JSON.stringify(csvC2[0]))
+
       // 10. jid normalization
       check('toJid 08xx -> 628xx@c.us', toJid('085284771336') === '6285284771336@c.us', toJid('085284771336'))
       check('toJid rejects junk', toJid('abc') === null)
@@ -1001,9 +1149,12 @@ function runSelfTest () {
       check('split is balanced', buckets.get('a1').length === 3 && buckets.get('a2').length === 2)
 
       // 12. schedule add + skip-on-late logic
-      const schRes = await js(`window.waMulti.addSchedule({ label:"Test Jadwal", kind:"personal", when: Date.now()+3600000, targets:[{phone:"628123456789"}], message:"hi", accounts:["${addA.id}"], delaySec:30, mode:"split" })`)
+      const schRes = await js(`window.waMulti.addSchedule({ label:"Test Jadwal", kind:"personal", when: Date.now()+3600000, targets:[{phone:"628123456789", custom:"aff-X"}], message:"hi {custom}", custom:"aff-Y", accounts:["${addA.id}"], delaySec:30, mode:"split" })`)
       check('schedule added', schRes.ok === true, JSON.stringify(schRes))
       check('schedule persisted to disk', JSON.parse(fs.readFileSync(SCHEDULES_FILE, 'utf8')).length === 1)
+      const schDisk = JSON.parse(fs.readFileSync(SCHEDULES_FILE, 'utf8'))[0]
+      check('schedule keeps per-target custom', schDisk.targets[0].custom === 'aff-X', JSON.stringify(schDisk.targets[0]))
+      check('schedule keeps blast-level custom', schDisk.custom === 'aff-Y', String(schDisk.custom))
       const badSch = await js('window.waMulti.addSchedule({ when: 1, targets:[], accounts:[] })')
       check('schedule rejects past time', badSch.ok === false, JSON.stringify(badSch))
       await js(`window.waMulti.cancelSchedule("${schRes.id}")`)

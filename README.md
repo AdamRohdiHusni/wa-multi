@@ -11,6 +11,7 @@ Dibuat buat yang megang beberapa nomor WA (mis. 5 nomor toko) tapi males buka 5 
 ### Tab & akun
 - **Multi-akun tanpa batas** dalam 1 window (tab bar di atas)
 - **Mode 2 tab**: akun pribadi (📌, wajib nyala) + 1 akun office nyala barengan — atau **mode 1 tab** (pribadi doang)
+- **Layout Penuh / Split**: default **penuh** (tab-by-tab full screen — WA lain tetap hidup di background, pindah tab **instan tanpa loading**, real-time); opsi **split** kiri-kanan kalau mau lihat 2 WA berdampingan
 - **Ringan** — max ~2 akun hidup; akun lain "parkir" (session di disk). RAM seukuran 1-2 WhatsApp Desktop, bukan 5× lipat
 - **Session persist** — QR sekali per akun; restart/tutup app pun tetep login
 - **Unread badge per akun** (update saat akun dibuka)
@@ -23,7 +24,8 @@ Dibuat buat yang megang beberapa nomor WA (mis. 5 nomor toko) tapi males buka 5 
 - **Blast grup**: ambil daftar grup akun, atau paste link undangan
 - **Multi-akun**: centang akun mana aja yang ikut kirim (yang gak dicentang gak ngirim apa-apa)
 - **Bagi rata**: target dibagi merata ke akun terpilih (round-robin) — atau mode "semua akun kirim ke semua"
-- **Template pesan**: sisipkan `{nama}` / `{nomor}`; bisa lampirkan gambar/file (PDF, dokumen, video)
+- **Template pesan**: sisipkan `{nama}` / `{nomor}` / **`{custom}`**; bisa lampirkan gambar/file (PDF, dokumen, video)
+- **{custom}**: isi beda-beda per target lewat kolom `custom` di CSV (mis. link affiliate tiap orang) — atau satu nilai buat semua lewat kolom "isi {custom}" di form
 - **Jeda antar pesan** (default 30 detik) + **batas harian per akun** (default 40)
 - **Progress live per akun** + log + Stop 1 akun / Stop Semua
 - Akun dirotasi **satu-satu** (nyala → kirim jatahnya → parkir) biar RAM aman di laptop lemah
@@ -84,7 +86,8 @@ vendor/wppconnect-wa.js  engine blast — di-inject ke WA Web yang udah login (n
 
 ### Gotcha penting (kalau mau modif)
 
-1. **Electron 33 menghapus `BrowserView`** → pakai `WebContentsView` + `win.contentView.addChildView()`.
+1. **Layout full = view bertumpuk, bukan di-destroy** — pindah tab = `bringToFront` (remove+add child view, tanpa reload). Chromium harus dilarang freeze tab background: `disable-backgrounding-occluded-windows` + `disable-features=CalculateNativeWinOcclusion`. Tanpa ini, WA di background bisa nyangkut di layar pas window restore/minimize (Windows).
+2. **Electron 33 menghapus `BrowserView`** → pakai `WebContentsView` + `win.contentView.addChildView()`.
 2. **`WebContentsView` selalu digambar DI ATAS HTML renderer** → dropdown/dialog bakal ketutupan + klik-nya ke-makan. Solusi: saat overlay kebuka, kirim `setOverlayOpen(true)` → bounds view jadi `0x0`. Ini **bukan** masalah z-index, gak bisa diakalin pakai CSS.
 3. **WA Web nolak user agent Electron** → nampilin halaman "WhatsApp works with Google Chrome 100+" dan QR gak muncul. FIX: spoof UA jadi Chrome standar sebelum `loadURL`.
 4. **`prompt()` / `confirm()` gak didukung** di renderer Electron → pakai `<dialog>` sendiri.
@@ -94,13 +97,18 @@ vendor/wppconnect-wa.js  engine blast — di-inject ke WA Web yang udah login (n
 
 ### Self-test
 
-App punya self-test bawaan (50 check: IPC, persistensi, slot/split, tema, regresi overlay, CSV, jadwal, guard blast):
+App punya self-test bawaan (69 check: IPC, persistensi, slot, layout full/split, switch tanpa reload, tema, regresi overlay, CSV + kolom custom, template {nama}/{nomor}/{custom}, jadwal, guard blast):
 
 ```bash
 WA_MULTI_DEV=1 WA_MULTI_SELFTEST=1 xvfb-run -a npx electron --no-sandbox .
 ```
 
 `WA_MULTI_SHOT=/tmp/prefix` = sekalian capture screenshot (dark/light/panel).
+
+Tes tambahan di `tests/` (jalanin manual, butuh hook `WA_MULTI_TESTHOOK=1`):
+- `switch_verify.js` — bukti pindah tab tanpa reload (0 navigasi) + latensi (~41-95ms)
+- `blast_engine_test2.js` — mesin blast dgn WA Web di-mock: template {custom} per target, rotasi akun, bagi rata
+- `guards_test.js` — batas harian berhenti tepat + stop blast berhenti di tengah
 
 ## Catatan
 
