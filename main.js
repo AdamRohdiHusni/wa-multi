@@ -18,6 +18,8 @@ const PREFS_FILE = path.join(userDataDir, 'prefs.json')
 const SCHEDULES_FILE = path.join(userDataDir, 'schedules.json')
 const HISTORY_FILE = path.join(userDataDir, 'history.json')
 const TMP_DIR = path.join(userDataDir, 'tmp')
+const { createLicense } = require('./license')
+const license = createLicense(userDataDir)
 
 app.commandLine.appendSwitch('disable-gpu') // lightweight on weak laptops
 app.commandLine.appendSwitch('disable-software-rasterizer')
@@ -93,6 +95,11 @@ function createWindow () {
   })
   Menu.setApplicationMenu(null)
   win.loadFile(path.join(__dirname, 'index.html'))
+  // license heartbeat (skip while self-testing — no network in hermetic runs)
+  if (!process.env.WA_MULTI_SELFTEST) {
+    license.heartbeat(true).catch(() => {})   // first check at launch
+    setInterval(() => license.heartbeat().catch(() => {}), 60 * 60 * 1000)  // hourly tick, acts every 7d
+  }
   if (IS_DEV) win.webContents.openDevTools({ mode: 'detach' })
   attachResizeHandler()
 
@@ -737,6 +744,7 @@ function notifyStateChanged () {
 }
 
 ipcMain.handle('wa-multi:getState', () => ({
+  license: license.status(),
   accounts: accounts.map(a => ({
     id: a.id, name: a.name, color: a.color || null,
     lastOpened: a.lastOpened || null,
@@ -761,6 +769,10 @@ ipcMain.handle('wa-multi:getState', () => ({
 }))
 
 ipcMain.handle('wa-multi:addAccount', (e, name) => {
+  const maxAcc = license.canAddAccount()
+  if (accounts.length >= maxAcc) {
+    return { ok: false, license: true, error: 'versi trial cuma bisa 1 akun WA — aktifin lisensi buat nambah akun' }
+  }
   const id = 'acc-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
   const palette = ['#25d366', '#34b7f1', '#f15f6d', '#f2a33c', '#a78bfa', '#2dd4bf']
   const color = palette[accounts.length % palette.length]
@@ -854,6 +866,20 @@ ipcMain.handle('wa-multi:setTabMode', (e, mode) => {
   if (activeAccountId) bringToFront(activeAccountId)
   notifyStateChanged()
   return { ok: true, tabMode: prefs.tabMode }
+})
+
+// ── licensing IPC ─────────────────────────────────────────────
+ipcMain.handle('wa-multi:licenseInfo', () => license.status())
+ipcMain.handle('wa-multi:activateLicense', async (e, key) => {
+  const r = await license.activate(key)
+  notifyStateChanged()
+  // kick an immediate heartbeat-able state refresh on success
+  return r
+})
+ipcMain.handle('wa-multi:deactivateLicense', async () => {
+  const r = await license.deactivate()
+  notifyStateChanged()
+  return r
 })
 
 ipcMain.handle('wa-multi:setTheme', (e, theme) => {
@@ -1026,6 +1052,7 @@ async function getFetchView (accountId) {
 
 // ── blast start / stop ────────────────────────────────────────
 ipcMain.handle('wa-multi:startBlast', async (e, cfg) => {
+  if (!license.canBlast()) return { ok: false, license: true, error: 'fitur blast khusus lisensi Pro — aktifin key dulu (menu 🔑 Lisensi)' }
   if (activeJob) return { ok: false, error: 'masih ada blast yang jalan' }
   const targets = (cfg.targets || []).map(t => ({
     jid: t.jid || null,
@@ -1066,6 +1093,7 @@ ipcMain.handle('wa-multi:stopBlast', (e, accountId) => {
 
 // ── schedules ─────────────────────────────────────────────────
 ipcMain.handle('wa-multi:addSchedule', (e, cfg) => {
+  if (!license.canBlast()) return { ok: false, license: true, error: 'fitur jadwal khusus lisensi Pro — aktifin key dulu (menu 🔑 Lisensi)' }
   const when = Number(cfg.when)
   if (!when || when < Date.now() - 60000) return { ok: false, error: 'waktu jadwal tidak valid' }
   const s = {

@@ -3,34 +3,21 @@
   "productName": "WA Multi",
   "version": "2.3.0",
   "description": "Multi-account WhatsApp Web desktop: instant tab-by-tab (or split) multi-account blast (personal & groups) with scheduling",
-  "main": "main.js",
+  "main": "index.js",
   "author": "Suki",
   "license": "MIT",
-  "scripts": {
-    "start": "electron .",
-    "dist": "electron-builder --win nsis --x64"
-  },
   "devDependencies": {
-    "bytenode": "^1.7.0",
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8"
+    "electron": "^33.2.0"
   },
   "build": {
     "appId": "id.mysuki.wamulti",
     "productName": "WA Multi",
     "icon": "build/icon.ico",
     "directories": {
-      "output": "dist"
+      "output": "../dist"
     },
     "files": [
-      "main.js",
-      "preload.js",
-      "index.html",
-      "app.js",
-      "app.css",
-      "README.md",
-      "vendor/wppconnect-wa.js",
-      "build/icon.png"
+      "**/*"
     ],
     "win": {
       "target": [
