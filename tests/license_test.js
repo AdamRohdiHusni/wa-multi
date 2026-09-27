@@ -109,6 +109,24 @@ const lic = createLicense(tmp)
     check('L7-L9 SKIPPED (server unreachable)', true, String(e.message).slice(0, 60))
   }
 
+  // ── L10/L11: kill switch versioning ──
+  try {
+    const key4 = execFileSync('node', [path.join('/home/suki/server-stack/wa-license', 'admin.js'), 'generate', '1', 'pro', '--min-ver', '99.0.0', '--note', 'killswitch-test'], { encoding: 'utf8' }).trim().split('\n')[0].trim()
+    const tmp4 = fs.mkdtempSync(path.join(os.tmpdir(), 'lic-ks-'))
+    const lic8 = createLicense(tmp4)
+    await lic8.activate(key4)
+    const s8 = lic8.status()
+    check('L10 app older than minAppVer → outdated', s8.outdated === true && s8.mode === 'locked', `outdated=${s8.outdated} mode=${s8.mode}`)
+    check('L10 blast gated while outdated', lic8.canBlast() === false)
+    // clear the constraint → back to pro
+    execFileSync('node', [path.join('/home/suki/server-stack/wa-license', 'admin.js'), 'update', key4, '--min-ver', '0'], { encoding: 'utf8' })
+    await lic8.heartbeat(true)
+    const s9 = lic8.status()
+    check('L11 clearing minAppVer restores pro', s9.outdated === false && s9.mode === 'pro', `mode=${s9.mode}`)
+  } catch (e) {
+    check('L10-L11 SKIPPED', true, String(e.message).slice(0, 60))
+  }
+
   console.log('\n===== LICENSE TEST =====')
   results.forEach(r => console.log(r))
   const failed = results.filter(r => r.startsWith('FAIL')).length

@@ -11,7 +11,7 @@
     {
       "src": "license.js",
       "out": "build/bytecode/license.jsc",
-      "bytes": 12408
+      "bytes": 13264
     }
   ]
 }

@@ -19,6 +19,20 @@ const LICENSE_URL = process.env.WA_MULTI_LICENSE_URL || 'https://license.mysuki.
 const TRIAL_DAYS = Number(process.env.WA_MULTI_TRIAL_DAYS || 7)
 const HEARTBEAT_EVERY = 7 * 24 * 60 * 60 * 1000   // 7 days
 const OFFLINE_GRACE = 14 * 24 * 60 * 60 * 1000     // 14 days
+// get the app's own version from package.json (works both dev & packaged)
+let APP_VERSION = '0.0.0'
+try { APP_VERSION = require('./package.json').version } catch (_) {}
+
+function cmpSemver (a, b) {
+  const pa = String(a || '0').split('.').map(Number)
+  const pb = String(b || '0').split('.').map(Number)
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) > (pb[i] || 0)) return 1
+    if ((pa[i] || 0) < (pb[i] || 0)) return -1
+  }
+  return 0
+}
+
 const PUBKEY = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAzfk7YR89A0+YIEX1nscHWUYaWlvz5eN1zabWZsQM1tM=
 -----END PUBLIC KEY-----`
@@ -79,11 +93,15 @@ function createLicense (userDataDir) {
         const locked = !!st.locked            // set only when server said dead
         const stale = offlineFor > OFFLINE_GRACE
         const licExpired = !!(payload.licExp && now > payload.licExp)
+        // kill switch versioning: app lebih tua dari minAppVer → downgrade ke trial
+        const outdated = !!(payload.minAppVer && cmpSemver(APP_VERSION, payload.minAppVer) < 0)
         const feat = payload.features || {}
         // feature gating: noBlast (multi-akun doang) < noSchedule < maxWa
-        const mode = (locked || licExpired) ? 'locked' : 'pro'
+        const mode = (locked || licExpired || outdated) ? 'locked' : 'pro'
         return {
           mode,
+          outdated,
+          minAppVer: payload.minAppVer || null,
           tier: payload.tier || 'basic',
           key: payload.key,
           locked,

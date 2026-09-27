@@ -25,6 +25,9 @@ function renderLicense (lic) {
     expired: { t: 'TRIAL HABIS', cls: 'lic-bad', tip: 'Masa coba habis — aktifin lisensi buat lanjut' },
     locked: { t: 'LOCKED', cls: 'lic-bad', tip: 'Lisensi dicabut / gak valid — hubungi penjual' }
   }
+  if (lic.outdated) {
+    map.pro = { t: 'UPDATE DIPERLUKAN', cls: 'lic-bad', tip: `Versi app lu (${lic.minAppVer ? 'di bawah ' + lic.minAppVer : 'lama'}) gak valid lagi — download versi terbaru dari penjual. Lisensi lu tetep aman.` }
+  }
   const m = map[lic.mode] || map.trial
   b.textContent = m.t
   b.className = 'ver ' + m.cls
@@ -67,6 +70,11 @@ function openLicenseDialog () {
   } else if (lic.mode === 'expired') {
     hint.innerHTML = `Masa coba <b>udah habis</b>.<br>Beli lisensi → aktifin key di bawah buat lanjut.`
     deact.classList.add('hidden')
+  } else if (lic.outdated) {
+    hint.innerHTML = `⚠️ <b>Versi app lu udah gak valid</b> (min. versi ${esc(lic.minAppVer || '?')}).<br>Lisensi lu <b>tetep terpasang & aman</b> — cuma app-nya yang perlu di-update.<br>Download installer terbaru dari penjual, install di atas yang lama (key gak perlu diinput ulang).`
+    $('licKey').classList.add('hidden')
+    $('licActivate').classList.add('hidden')
+    deact.classList.remove('hidden')
   } else {
     hint.innerHTML = `Lisensi <b>gak aktif</b> (<code>${esc(lic.locked ? 'dicabut/expired' : '—')}</code>).<br>Masukin key yang valid buat buka semua fitur.`
     deact.classList.add('hidden')
