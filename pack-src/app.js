@@ -17,8 +17,10 @@ let ctxMenu = null
 function renderLicense (lic) {
   const b = $('licenseBadge')
   if (!b) return
+  const f = lic.features || {}
+  const featTxt = f.noBlast ? 'MULTI-AKUN' : f.noSchedule ? 'PRO*' : 'PRO'
   const map = {
-    pro: { t: 'PRO', cls: 'lic-pro', tip: 'Lisensi aktif — semua fitur kebuka' },
+    pro: { t: featTxt, cls: 'lic-pro', tip: `Lisensi ${lic.tier || ''} aktif${Object.keys(f).length ? ' · batasan: ' + Object.entries(f).map(([k, v]) => k + '=' + v).join(', ') : ' · semua fitur'}` },
     trial: { t: 'TRIAL ' + (lic.daysLeft ?? '?') + 'd', cls: 'lic-trial', tip: 'Masa coba — blast & jadwal digembok' },
     expired: { t: 'TRIAL HABIS', cls: 'lic-bad', tip: 'Masa coba habis — aktifin lisensi buat lanjut' },
     locked: { t: 'LOCKED', cls: 'lic-bad', tip: 'Lisensi dicabut / gak valid — hubungi penjual' }
@@ -28,10 +30,11 @@ function renderLicense (lic) {
   b.className = 'ver ' + m.cls
   b.title = m.tip
   // lock the pro-only actions visually
-  const canPro = lic.mode === 'pro'
-  for (const id of ['btnStart', 'btnSchedule']) {
+  const canPro = lic.mode === 'pro' && !f.noBlast
+  const canSched = canPro && !f.noSchedule
+  for (const [id, ok] of [['btnStart', canPro], ['btnSchedule', canSched]]) {
     const el = $(id)
-    if (el) { el.classList.toggle('locked', !canPro); el.title = canPro ? '' : 'khusus lisensi Pro' }
+    if (el) { el.classList.toggle('locked', !ok); el.title = ok ? '' : 'gak termasuk paket lisensi lu' }
   }
   if (lic.mode === 'expired' || lic.mode === 'locked') {
     const dlg = $('licenseDlg')
@@ -48,7 +51,13 @@ function openLicenseDialog () {
   const body = $('licBody')
   const deact = $('licDeactRow')
   if (lic.mode === 'pro') {
-    hint.innerHTML = `Lisensi <b>AKTIF</b> (${esc(lic.tier || 'pro')})<br>Key: <code>${esc(lic.key || '-')}</code>`
+    const f = lic.features || {}
+    const lims = []
+    if (f.noBlast) lims.push('tanpa blast')
+    if (f.noSchedule) lims.push('tanpa jadwal')
+    if (f.maxWa) lims.push(`max ${f.maxWa} akun WA`)
+    const exp = lic.licExp ? `berlaku s.d. <b>${new Date(lic.licExp).toLocaleDateString('id-ID')}</b>` : '_lifetime_'
+    hint.innerHTML = `Lisensi <b>AKTIF</b> (${esc(lic.tier || 'pro')})<br>${exp}<br>Key: <code>${esc(lic.key || '-')}</code>${lims.length ? `<br>Batasan paket: <b>${esc(lims.join(', '))}</b>` : ''}`
     $('licKey').classList.add('hidden')
     $('licActivate').classList.add('hidden')
     deact.classList.remove('hidden')

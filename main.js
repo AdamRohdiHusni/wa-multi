@@ -769,9 +769,11 @@ ipcMain.handle('wa-multi:getState', () => ({
 }))
 
 ipcMain.handle('wa-multi:addAccount', (e, name) => {
-  const maxAcc = license.canAddAccount()
+  const maxAcc = license.maxWaAccounts()
   if (accounts.length >= maxAcc) {
-    return { ok: false, license: true, error: 'versi trial cuma bisa 1 akun WA — aktifin lisensi buat nambah akun' }
+    return { ok: false, license: true, error: maxAcc === 1
+      ? 'versi trial cuma bisa 1 akun WA — aktifin lisensi buat nambah akun'
+      : `paket lisensi lu max ${maxAcc} akun WA — upgrade ke penjual kalo mau nambah` }
   }
   const id = 'acc-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
   const palette = ['#25d366', '#34b7f1', '#f15f6d', '#f2a33c', '#a78bfa', '#2dd4bf']
@@ -1093,7 +1095,8 @@ ipcMain.handle('wa-multi:stopBlast', (e, accountId) => {
 
 // ── schedules ─────────────────────────────────────────────────
 ipcMain.handle('wa-multi:addSchedule', (e, cfg) => {
-  if (!license.canBlast()) return { ok: false, license: true, error: 'fitur jadwal khusus lisensi Pro — aktifin key dulu (menu 🔑 Lisensi)' }
+  if (!license.canBlast()) return { ok: false, license: true, error: 'fitur blast khusus lisensi Pro — aktifin key dulu (menu 🔑 Lisensi)' }
+  if (!license.canSchedule()) return { ok: false, license: true, error: 'paket lisensi lu gak termasuk fitur jadwal — upgrade ke penjual' }
   const when = Number(cfg.when)
   if (!when || when < Date.now() - 60000) return { ok: false, error: 'waktu jadwal tidak valid' }
   const s = {

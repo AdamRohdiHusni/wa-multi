@@ -6,12 +6,12 @@
     {
       "src": "main.js",
       "out": "build/bytecode/main.jsc",
-      "bytes": 105120
+      "bytes": 105384
     },
     {
       "src": "license.js",
       "out": "build/bytecode/license.jsc",
-      "bytes": 11528
+      "bytes": 12408
     }
   ]
 }

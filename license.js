@@ -78,11 +78,18 @@ function createLicense (userDataDir) {
         const offlineFor = now - (st.lastCheckAt || payload.iat || now)
         const locked = !!st.locked            // set only when server said dead
         const stale = offlineFor > OFFLINE_GRACE
+        const licExpired = !!(payload.licExp && now > payload.licExp)
+        const feat = payload.features || {}
+        // feature gating: noBlast (multi-akun doang) < noSchedule < maxWa
+        const mode = (locked || licExpired) ? 'locked' : 'pro'
         return {
-          mode: locked ? 'locked' : 'pro',
+          mode,
           tier: payload.tier || 'basic',
           key: payload.key,
           locked,
+          licExpired,
+          licExp: payload.licExp || null,
+          features: feat,                     // {noSchedule, noBlast, maxWa}
           offlineFor,
           stale,                              // warn in UI, still runs (fail-open)
           machineId: mid,
@@ -99,10 +106,21 @@ function createLicense (userDataDir) {
     return { mode: 'trial', daysLeft, machineId: mid }
   }
 
-  // blast/schedule allowed only in pro
+  // blast/schedule allowed only in pro (and not disabled per feature)
   function canBlast () {
     const s = status()
-    return s.mode === 'pro'
+    if (s.mode !== 'pro') return false
+    if (s.features && s.features.noBlast) return false
+    return true
+  }
+  function canSchedule () {
+    const s = status()
+    return s.mode === 'pro' && !(s.features && s.features.noSchedule)
+  }
+  function maxWaAccounts () {
+    const s = status()
+    if (s.mode !== 'pro') return 1
+    return (s.features && s.features.maxWa) ? s.features.maxWa : Infinity
   }
   const canAddAccount = () => {
     const s = status()
@@ -162,7 +180,7 @@ function createLicense (userDataDir) {
         return { ok: true, status: status() }
       }
       // server explicitly rejected → real lock (revoked / expired / bad sig)
-      if (['KEY_REVOKED', 'KEY_NOT_FOUND', 'BAD_SIGNATURE', 'TOKEN_EXPIRED', 'BAD_TOKEN'].includes(res.code)) {
+      if (['KEY_REVOKED', 'KEY_EXPIRED', 'KEY_NOT_FOUND', 'BAD_SIGNATURE', 'TOKEN_EXPIRED', 'BAD_TOKEN'].includes(res.code)) {
         st.locked = true
         st.lockReason = res.code
         writeState(st)
@@ -185,7 +203,7 @@ function createLicense (userDataDir) {
 
   function reset () { st = {}; writeState(st); return status() }   // self-test helper
 
-  return { status, activate, heartbeat, deactivate, canBlast, canAddAccount, machineId, reset, _st: () => st, _file: FILE }
+  return { status, activate, heartbeat, deactivate, canBlast, canSchedule, maxWaAccounts, canAddAccount, machineId, reset, _st: () => st, _file: FILE }
 }
 
 module.exports = { createLicense, machineId }

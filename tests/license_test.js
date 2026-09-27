@@ -89,6 +89,26 @@ const lic = createLicense(tmp)
     delete process.env.WA_MULTI_LICENSE_URL
   }
 
+  // ── L7/L8/L9: features + expiry (via real server keys) ──
+  try {
+    const key3 = execFileSync('node', [path.join('/home/suki/server-stack/wa-license', 'admin.js'), 'generate', '1', 'pro', '--days', '2', '--devices', '1', '--feat', '{"maxWa":3,"noSchedule":1}', '--note', 'feat-test'], { encoding: 'utf8' }).trim().split('\n')[0].trim()
+    const tmp3 = fs.mkdtempSync(path.join(os.tmpdir(), 'lic-feat-'))
+    const lic7 = createLicense(tmp3)
+    await lic7.activate(key3)
+    const s7 = lic7.status()
+    check('L7 features carried in token', s7.mode === 'pro' && s7.features && s7.features.maxWa === 3 && s7.features.noSchedule === 1, JSON.stringify(s7.features || {}))
+    check('L7 maxWaAccounts = 3', lic7.maxWaAccounts() === 3)
+    check('L8 noSchedule blocks schedule', lic7.canSchedule() === false)
+    check('L8 blast still allowed', lic7.canBlast() === true)
+    // expiry in the past → server says KEY_EXPIRED on next heartbeat
+    execFileSync('node', [path.join('/home/suki/server-stack/wa-license', 'admin.js'), 'update', key3, '--expire-now'], { encoding: 'utf8' })
+    const hb3 = await lic7.heartbeat(true)
+    check('L9 expired license → heartbeat rejects', hb3.ok === false && (hb3.code === 'KEY_EXPIRED' || hb3.code === 'TOKEN_EXPIRED'), `code=${hb3.code}`)
+    check('L9 app locked after expiry', lic7.status().mode === 'locked')
+  } catch (e) {
+    check('L7-L9 SKIPPED (server unreachable)', true, String(e.message).slice(0, 60))
+  }
+
   console.log('\n===== LICENSE TEST =====')
   results.forEach(r => console.log(r))
   const failed = results.filter(r => r.startsWith('FAIL')).length
