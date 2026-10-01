@@ -449,7 +449,11 @@ function renderGroupBatch () {
     const checked = targets.some(t => t.jid === g.id)
     const row = document.createElement('label')
     row.className = 'mini-item' + (checked ? ' on' : '')
-    row.innerHTML = `<input type="checkbox" ${checked ? 'checked' : ''} /><span class="mn">${esc(g.name || g.id)}</span>`
+    row.innerHTML = `<input type="checkbox" ${checked ? 'checked' : ''} /><span class="mn">${esc(g.name || g.id)}</span><button type="button" class="link-btn gmem" title="Lihat member grup">👥</button>`
+    row.querySelector('.gmem').addEventListener('click', async (ev) => {
+      ev.preventDefault(); ev.stopPropagation()
+      showGroupMembers(g, ev.target)
+    })
     row.querySelector('input').addEventListener('change', (e) => {
       const on = e.target.checked
       row.classList.toggle('on', on)
@@ -567,6 +571,46 @@ $('btnStart').addEventListener('click', async () => {
 $('btnStopAll').addEventListener('click', async () => {
   await window.waMulti.stopBlast(null)
   toast('stop diminta — nunggu pesan yang lagi jalan')
+})
+
+// ── group members viewer ──────────────────────────────────────
+let membersCache = []
+async function showGroupMembers (g, btn) {
+  const dlg = $('membersDlg')
+  $('membersTitle').textContent = 'Member: ' + (g.name || g.id)
+  $('membersInfo').textContent = 'ngambil member…'
+  $('membersList').innerHTML = ''
+  if (btn) { btn.disabled = true; btn.textContent = '⏳' }
+  dlg.showModal()
+  const accId = $('groupAccSel').value
+  const r = await window.waMulti.fetchGroupMembers(accId, g.id)
+  if (btn) { btn.disabled = false; btn.textContent = '👥' }
+  if (!r.ok) { $('membersInfo').textContent = 'gagal: ' + r.error; return }
+  membersCache = r.members || []
+  $('membersInfo').textContent = membersCache.length + ' member · admin ditandai 🛡'
+  $('membersList').innerHTML = membersCache.map(m =>
+    `<div class="mm"><span>${esc(m.name || '(tanpa nama)')}${m.isAdmin ? '<span class="adm">🛡 admin</span>' : ''}</span><span class="num">${esc(m.number)}</span></div>`
+  ).join('') || '<div class="mm"><span>gak ada member ketemu</span></div>'
+}
+function membersText (numOnly) {
+  return membersCache.map(m => numOnly ? m.number : (m.name ? m.name + ' — ' + m.number : m.number)).join('\n')
+}
+$('membersCopyAll').addEventListener('click', async () => {
+  await navigator.clipboard.writeText(membersText(false))
+  toast('nama+nomor ke-copy (' + membersCache.length + ')')
+})
+$('membersCopyNum').addEventListener('click', async () => {
+  await navigator.clipboard.writeText(membersText(true))
+  toast('nomor ke-copy (' + membersCache.length + ')')
+})
+$('membersCsv').addEventListener('click', () => {
+  const rows = [['nama', 'nomor', 'admin']].concat(membersCache.map(m => [m.name || '', m.number, m.isAdmin ? 'ya' : '']))
+  const csv = rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\n')
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
+  a.download = 'member-grup.csv'
+  a.click()
+  toast('CSV ke-download')
 })
 
 // ── blast: schedule dialog ────────────────────────────────────

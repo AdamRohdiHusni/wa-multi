@@ -459,6 +459,30 @@ async function fetchGroups (view) {
   return { ok: true, groups: raw || [] }
 }
 
+async function fetchGroupMembers (view, groupId) {
+  await ensureEngine(view)
+  const raw = await view.webContents.executeJavaScript(`(async () => {
+    try {
+      const gid = ${JSON.stringify(groupId)}
+      let meta = null
+      try { const chat = await window.WPP.chat.get(gid); meta = chat && (chat.groupMetadata || chat) } catch (e) {}
+      if (!meta || !meta.participants) {
+        const list = await window.WPP.group.getAllGroups()
+        const g = (list || []).find(x => x && x.id && (x.id._serialized === gid || x.id.user === gid.split('@')[0]))
+        meta = g && (g.groupMetadata || g)
+      }
+      const parts = (meta && meta.participants) || []
+      return parts.map(p => ({
+        number: (p.id && (p.id._serialized || p.id.user) || '').split('@')[0].replace(/^[0-9]+_/, ''),
+        name: (p.contact && (p.contact.name || p.contact.pushname || p.contact.formattedName)) || p.displayName || '',
+        isAdmin: !!(p.isAdmin || p.isSuperAdmin)
+      })).filter(x => x.number)
+    } catch (e) { return { __err: String(e).slice(0,200) } }
+  })()`).catch(e => ({ __err: String(e).slice(0, 200) }))
+  if (raw && raw.__err) return { ok: false, error: raw.__err }
+  return { ok: true, members: raw || [] }
+}
+
 async function groupFromInvite (view, link) {
   await ensureEngine(view)
   const code = String(link || '').replace(/^.*chat\.whatsapp\.com\//i, '').replace(/[^A-Za-z0-9]/g, '')
@@ -1025,6 +1049,14 @@ ipcMain.handle('wa-multi:fetchGroups', async (e, accountId) => {
   const w = await getFetchView(accountId)
   if (!w.ok) return w
   const r = await fetchGroups(w.view)
+  releaseWorker(accountId, w.temp)
+  return r
+})
+
+ipcMain.handle('wa-multi:fetchGroupMembers', async (e, { accountId, groupId }) => {
+  const w = await getFetchView(accountId)
+  if (!w.ok) return w
+  const r = await fetchGroupMembers(w.view, groupId)
   releaseWorker(accountId, w.temp)
   return r
 })

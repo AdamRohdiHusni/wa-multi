@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('waMulti', {
   pickCsv: () => ipcRenderer.invoke('wa-multi:pickCsv'),
   pickMedia: () => ipcRenderer.invoke('wa-multi:pickMedia'),
   fetchContacts: (accountId) => ipcRenderer.invoke('wa-multi:fetchContacts', accountId),
+  fetchGroupMembers: (accountId, groupId) => ipcRenderer.invoke('wa-multi:fetchGroupMembers', { accountId, groupId }),
   fetchGroups: (accountId) => ipcRenderer.invoke('wa-multi:fetchGroups', accountId),
   groupFromInvite: (accountId, link) => ipcRenderer.invoke('wa-multi:groupFromInvite', { accountId, link }),
   // blast
