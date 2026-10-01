@@ -588,8 +588,11 @@ async function showGroupMembers (g, btn) {
   if (!r.ok) { $('membersInfo').textContent = 'gagal: ' + r.error; return }
   membersCache = r.members || []
   $('membersInfo').textContent = membersCache.length + ' member · admin ditandai 🛡'
+  const unresolved = membersCache.filter(m => m.unresolved).length
+  $('membersInfo').textContent = membersCache.length + ' member · admin 🛡' +
+    (unresolved ? ` · ⚠️ ${unresolved} nomor gak ke-resolve (LID)` : '')
   $('membersList').innerHTML = membersCache.map(m =>
-    `<div class="mm"><span>${esc(m.name || '(tanpa nama)')}${m.isAdmin ? '<span class="adm">🛡 admin</span>' : ''}</span><span class="num">${esc(m.number)}</span></div>`
+    `<div class="mm"><span>${esc(m.name || '(tanpa nama)')}${m.isAdmin ? '<span class="adm">🛡 admin</span>' : ''}${m.unresolved ? '<span class="adm" style="color:#e17076">⚠️ LID</span>' : ''}</span><span class="num">${esc(m.number)}</span></div>`
   ).join('') || '<div class="mm"><span>gak ada member ketemu</span></div>'
 }
 function membersText (numOnly) {
@@ -604,7 +607,8 @@ $('membersCopyNum').addEventListener('click', async () => {
   toast('nomor ke-copy (' + membersCache.length + ')')
 })
 $('membersCsv').addEventListener('click', () => {
-  const rows = [['nama', 'nomor', 'admin']].concat(membersCache.map(m => [m.name || '', m.number, m.isAdmin ? 'ya' : '']))
+  const hasLid = membersCache.some(m => m.lid)
+  const rows = [['nama', 'nomor', 'admin'].concat(hasLid ? ['lid_id'] : [])].concat(membersCache.map(m => [m.name || '', m.number, m.isAdmin ? 'ya' : ''].concat(hasLid ? [m.lid || ''] : [])))
   const csv = rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\n')
   const a = document.createElement('a')
   a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))

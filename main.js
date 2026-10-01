@@ -472,11 +472,42 @@ async function fetchGroupMembers (view, groupId) {
         meta = g && (g.groupMetadata || g)
       }
       const parts = (meta && meta.participants) || []
-      return parts.map(p => ({
-        number: (p.id && (p.id._serialized || p.id.user) || '').split('@')[0].replace(/^[0-9]+_/, ''),
-        name: (p.contact && (p.contact.name || p.contact.pushname || p.contact.formattedName)) || p.displayName || '',
-        isAdmin: !!(p.isAdmin || p.isSuperAdmin)
-      })).filter(x => x.number)
+      // LID→phone resolver: WA groups baru pakai LID (2157…@lid), nomor asli harus
+      // di-resolve via lidPnCache. Coba beberapa path sesuai versi WA Web.
+      const getResolver = () => {
+        const cands = [
+          window.WPP && window.WPP.whatsapp && window.WPP.whatsapp.functions && window.WPP.whatsapp.functions.getPhoneNumber,
+          window.WPP && window.WPP.whatsapp && window.WPP.whatsapp.lidPnCache && window.WPP.whatsapp.lidPnCache.getPhoneNumber,
+          window.WPP && window.WPP.util && window.WPP.util.lidPnCache && window.WPP.util.lidPnCache.getPhoneNumber
+        ].filter(x => typeof x === 'function')
+        return cands[0] || null
+      }
+      const resolvePhone = (lidId, resolver) => {
+        try { if (resolver) { const pn = resolver(lidId); if (pn && pn.user) return pn } } catch (e) {}
+        // fallback: contact store mungkin punya phone number ter-embed
+        const c = lidId && lidId._serialized ? (lidId.contact || null) : null
+        if (c && c.phone && String(c.phone).length >= 8) return { user: String(c.phone) }
+        return null
+      }
+      return parts.map(p => {
+        const pid = p.id || {}
+        const isLid = pid.server === 'lid' || String(pid._serialized || '').endsWith('@lid')
+        let number = ''
+        if (isLid) {
+          const resolver = getResolver()
+          const pn = resolvePhone(pid, resolver)
+          number = pn ? pn.user : (pid.user || '')
+        } else {
+          number = (pid._serialized || pid.user || '').split('@')[0]
+        }
+        return {
+          number,
+          lid: isLid ? (pid.user || '') : '',
+          name: (p.contact && (p.contact.name || p.contact.pushname || p.contact.formattedName)) || p.displayName || '',
+          isAdmin: !!(p.isAdmin || p.isSuperAdmin),
+          unresolved: isLid && !number
+        }
+      }).filter(x => x.number)
     } catch (e) { return { __err: String(e).slice(0,200) } }
   })()`).catch(e => ({ __err: String(e).slice(0, 200) }))
   if (raw && raw.__err) return { ok: false, error: raw.__err }
