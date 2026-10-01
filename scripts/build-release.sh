@@ -15,22 +15,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 
-echo "── 1/3 compiling bytecode (electron runtime) ──────────────"
+echo "── 1/3 obfuscating core (portable JS — runs on any OS) ────"
 rm -rf build/bytecode pack-src
-ELECTRON_RUN_AS_NODE=1 npx electron scripts/compile-bytecode.js
+mkdir -p pack-src
+node scripts/obfuscate.js
 
 echo "── 2/3 staging pack-src ───────────────────────────────────"
-mkdir -p pack-src
-cp build/bytecode/main.jsc build/bytecode/license.jsc pack-src/
-# license.js is require('./license')d from main.jsc → the .jsc next to it wins.
-# Ship the bootstrap + UI + vendor. NO main.js / license.js source.
-cat > pack-src/index.js <<'EOF'
-// bootstrap: loads the compiled main module (bytecode)
-require('bytenode')
-require('./main.jsc')
-EOF
+# obfuscated main.js/license.js land directly in pack-src (plain JS, no bootstrap
+# needed): package.json main stays 'main.js'. NO readable core source shipped.
 cp package.json pack-src/package.json
-node scripts/stage-pkg.js   # patch staged package.json (entry=bootstrap, bytenode prod dep)
+node scripts/stage-pkg.js   # patch staged package.json (deps, build config)
 # bytenode must be resolvable at runtime: symlink real node_modules (electron
 # version detection) AND ensure bytenode exists inside the staged tree
 ln -sfn "$ROOT/node_modules" node_modules

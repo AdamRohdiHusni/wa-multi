@@ -3,7 +3,7 @@
   "productName": "WA Multi",
   "version": "2.5.0",
   "description": "Multi-account WhatsApp Web desktop: instant tab-by-tab (or split) multi-account blast (personal & groups) with scheduling",
-  "main": "index.js",
+  "main": "main.js",
   "author": "Suki",
   "license": "MIT",
   "devDependencies": {
@@ -32,8 +32,5 @@
       "createStartMenuShortcut": true,
       "shortcutName": "WA Multi"
     }
-  },
-  "dependencies": {
-    "bytenode": "^1.7.0"
   }
 }

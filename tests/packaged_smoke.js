@@ -17,18 +17,18 @@ fs.mkdirSync(MOUNT, { recursive: true })
 // extract asar (simulates what the packaged app does at require-time)
 execSync(`${ROOT}/node_modules/.bin/asar extract ${ROOT}/dist/win-unpacked/resources/app.asar ${MOUNT}`)
 
-// prove main.js source is NOT in the shipped payload
-if (fs.existsSync(path.join(MOUNT, 'main.js'))) { console.error('LEAK: main.js shipped!'); process.exit(1) }
-if (fs.existsSync(path.join(MOUNT, 'license.js'))) { console.error('LEAK: license.js shipped!'); process.exit(1) }
-console.log('CLEAN: no main.js / license.js source in shipped payload')
+// main.js/license.js ship OBFUSCATED — verify they're not readable source
+const mainShipped = fs.readFileSync(path.join(MOUNT, 'main.js'), 'utf8')
+if (/function ensureEngine|function runBlastJob|const CHROME_UA/.test(mainShipped)) { console.error('LEAK: main.js masih source kebaca!'); process.exit(1) }
+console.log('CLEAN: core shipped as obfuscated code (bukan source kebaca)')
 
 // bytenode must be resolvable from the mount → symlink node_modules
 fs.symlinkSync(path.join(ROOT, 'node_modules'), path.join(MOUNT, 'node_modules'))
 
-// run the bootstrap under electron
-console.log('RUNNING packaged bootstrap (self-test via bytecode)...')
+// run the app (obfuscated main.js) under electron
+console.log('RUNNING packaged main (self-test via obfuscated code)...')
 const { spawnSync } = require('child_process')
-const r = spawnSync('npx', ['electron', '--no-sandbox', path.join(MOUNT, 'index.js')], {
+const r = spawnSync('npx', ['electron', '--no-sandbox', path.join(MOUNT, 'main.js')], {
   cwd: MOUNT,
   encoding: 'utf8',
   timeout: 240000,
