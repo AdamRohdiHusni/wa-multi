@@ -30,22 +30,11 @@ require('bytenode')
 require('./main.jsc')
 EOF
 cp package.json pack-src/package.json
-# patch staged package.json: entry = bootstrap, no devDeps needed inside asar
-node -e "
-const fs = require('fs')
-const root = JSON.parse(fs.readFileSync('package.json', 'utf8'))
-const p = { ...root, main: 'index.js' }
-p.devDependencies = { electron: root.devDependencies.electron }
-p.build = p.build || {}
-delete p.scripts
-// self-contained build config for the staged dir
-p.build = {
-  ...root.build,
-  files: ['**/*'],
-  directories: { output: '../dist' }
-}
-fs.writeFileSync('pack-src/package.json', JSON.stringify(p, null, 2))
-"
+node scripts/stage-pkg.js   # patch staged package.json (entry=bootstrap, bytenode prod dep)
+# bytenode must be resolvable at runtime: symlink real node_modules (electron
+# version detection) AND ensure bytenode exists inside the staged tree
+ln -sfn "$ROOT/node_modules" node_modules
+[ -d "$ROOT/node_modules/bytenode" ] || { echo "FATAL: bytenode belum di-install"; exit 1; }
 cp -r vendor pack-src/vendor
 cp index.html app.css app.js preload.js pack-src/
 mkdir -p pack-src/build && cp build/icon.png pack-src/build/ 2>/dev/null || true

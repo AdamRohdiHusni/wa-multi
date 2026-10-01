@@ -6,7 +6,7 @@
     {
       "src": "main.js",
       "out": "build/bytecode/main.jsc",
-      "bytes": 105384
+      "bytes": 105400
     },
     {
       "src": "license.js",
