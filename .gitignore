@@ -18,3 +18,5 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+dev-app-update.yml
+tests/dev-app-update.yml

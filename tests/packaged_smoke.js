@@ -1,6 +1,11 @@
 // Smoke-test the PACKAGED app: extract app.asar and boot the OBFUSCATED main.js
 // under Electron's own runtime, then read the self-test verdict from stdout.
 // Proves: (a) obfuscated code actually runs, (b) electron-updater ships, (c) all checks pass.
+//
+// ⚠️ NEVER run `asar extract-file <asar> main.js` from the repo root — asar writes the
+// extracted file to the CURRENT WORKING DIRECTORY (ignoring the 3rd arg) and will
+// silently overwrite the real source main.js with the obfuscated build. Always
+// `asar extract` into a scratch dir (as below), or pass an explicit output dir.
 process.env.WA_MULTI_DEV = '1'
 process.env.WA_MULTI_SELFTEST = '1'
 process.env.WA_MULTI_LIC_FORCE = 'pro'
@@ -35,7 +40,9 @@ fs.rmSync(nm, { recursive: true, force: true })
 fs.symlinkSync(path.join(ROOT, 'node_modules'), nm, 'dir')
 
 console.log('RUNNING packaged main (self-test via obfuscated code)...')
-const r = spawnSync('npx', ['electron', '--no-sandbox', path.join(MOUNT, 'main.js')], {
+// Boot the MOUNT as the app directory (not `electron main.js`): Electron then reads
+// MOUNT/package.json, so app.getVersion() returns 2.6.0 like a real install would.
+const r = spawnSync('npx', ['electron', '--no-sandbox', MOUNT], {
   cwd: MOUNT, encoding: 'utf8', timeout: 300000, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe']
 })
 const out = (r.stdout || '') + (r.stderr || '')
