@@ -72,34 +72,39 @@ const saveHistory = () => writeJson(HISTORY_FILE, history)
 
 // Engine yang diinjeksi ke dalam WebContentsView WA Web (tanpa preload).
 // Dipakai string concat (bukan template literal) supaya aman saat di-obfuscate.
-const INITIAL_ENGINE = "(function(){" +
+const INITIAL_ENGINE =   "(function(){" +
   "if(window.__WA_MULTI_INITIAL_ENGINE__){return 'exists'}" +
   "var CFG={enabled:false,code:'',name:'',append:true,skipGroups:true,showBadge:true};" +
   "var STATE={last:0,appended:0};" +
   "function isGroupChat(){try{var h=document.querySelector('#main header');if(h){" +
-  "if(h.querySelector('[data-icon=\\\"default-group\\\"],[data-icon=\\\"group\\\"]'))return true;" +
+  "if(h.querySelector('[data-icon=\"default-group\"],[data-icon=\"group\"]'))return true;" +
   "var t=(h.innerText||'');if(/group info|info grup/i.test(t))return true;" +
-  "if(h.querySelector('img[src*=\\\"g.us\\\"]'))return true}}catch(e){}return false}" +
+  "if(h.querySelector('img[src*=\"g.us\"]'))return true}}catch(e){}return false}" +
   "function composerEl(){try{var ae=document.activeElement;if(ae&&ae.isContentEditable)return ae;" +
-  "var q=document.querySelector('#main footer div[contenteditable=\\\"true\\\"]');return q||null}catch(e){return null}}" +
+  "var q=document.querySelector('#main footer div[contenteditable=\"true\"]');return q||null}catch(e){return null}}" +
   "function textOf(el){try{return (el.innerText||el.textContent||'')}catch(e){return ''}}" +
-  "function appendCode(el,code){try{var marker='/'+code;var t=textOf(el).trim();" +
+  "function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}" +
+  "function marker(){try{return String(CFG.code||'').trim()}catch(e){return ''}}" +
+  "function appendCode(el){try{var m=marker();if(!m)return false;" +
+  "var t=textOf(el).replace(/\\s+$/,'');" +
   "if(!t)return false;" +
-  "if(t.length>=marker.length&&t.slice(0-marker.length)===marker)return false;" +
+  "if(t.slice(0-m.length)===m)return false;" +
   "el.focus();var sel=window.getSelection();var r=document.createRange();" +
   "r.selectNodeContents(el);r.collapse(false);sel.removeAllRanges();sel.addRange(r);" +
-  "document.execCommand('insertText',false,' '+marker);STATE.last=Date.now();return true}catch(e){return false}}" +
-  "function shouldAppend(){if(!CFG.enabled||!CFG.append)return false;if(!CFG.code)return false;" +
+  "var ok=false;try{ok=document.execCommand('insertHTML',false,'<br>'+esc(m))}catch(e){}" +
+  "if(!ok){try{ok=document.execCommand('insertText',false,'\\n'+m)}catch(e){}}" +
+  "STATE.last=Date.now();return !!ok}catch(e){return false}}" +
+  "function shouldAppend(){if(!CFG.enabled)return false;if(!marker())return false;" +
   "if(CFG.skipGroups&&isGroupChat())return false;return true}" +
   "function onKey(e){try{if(e.key!=='Enter'||e.shiftKey||e.ctrlKey||e.altKey||e.metaKey)return;" +
   "if(!shouldAppend())return;var el=composerEl();if(!el)return;" +
-  "if(appendCode(el,CFG.code))STATE.appended++}catch(err){}}" +
+  "if(appendCode(el))STATE.appended++}catch(err){}}" +
   "function onClick(e){try{if(!shouldAppend())return;var t=e.target;" +
-  "var btn=t&&t.closest?t.closest('[data-testid=\\\"send\\\"],button[aria-label*=\\\"Send\\\"],button[aria-label*=\\\"Kirim\\\"],[data-icon=\\\"send\\\"]'):null;" +
+  "var btn=t&&t.closest?t.closest('[data-testid=\"send\"],button[aria-label*=\"Send\"],button[aria-label*=\"Kirim\"],[data-icon=\"send\"]'):null;" +
   "if(!btn)return;var el=composerEl();if(!el)return;" +
-  "if(appendCode(el,CFG.code))STATE.appended++}catch(err){}}" +
+  "if(appendCode(el))STATE.appended++}catch(err){}}" +
   "window.__WA_MULTI_INITIAL_ENGINE__={setCfg:function(c){try{CFG=Object.assign(CFG,c||{})}catch(e){}}," +
-  "get:function(){return {enabled:!!CFG.enabled,code:CFG.code||'',name:CFG.name||''," +
+  "get:function(){return {enabled:!!CFG.enabled,code:CFG.code||'',marker:marker(),name:CFG.name||''," +
   "isGroup:isGroupChat(),appended:STATE.appended,lastAppend:STATE.last,ts:Date.now()}}};" +
   "document.addEventListener('keydown',onKey,true);" +
   "document.addEventListener('click',onClick,true);" +
@@ -216,20 +221,24 @@ function mapGet(id) {
 }
 
 let waUpdater = null
+let updateReady = false   // set once the installer has been downloaded and waits for the user
 function initUpdater() {
   if (waUpdater) return waUpdater
   try {
     const eu = require('electron-updater')
     waUpdater = eu && eu.autoUpdater
     if (!waUpdater) throw new Error('autoUpdater tidak tersedia')
-    try { waUpdater.autoDownload = true } catch (e) {}
-    try { waUpdater.autoInstallOnAppQuit = true } catch (e) {}
+    // Adam: NEVER auto-update. Checking is manual and downloading only happens
+    // after the user explicitly clicks "Update sekarang" — the app must never
+    // replace itself behind the user's back.
+    try { waUpdater.autoDownload = false } catch (e) {}
+    try { waUpdater.autoInstallOnAppQuit = false } catch (e) {}
     try { waUpdater.setFeedURL({ provider: 'github', owner: UPDATER_OWNER, repo: UPDATER_REPO }) } catch (e) {}
     waUpdater.on('checking-for-update', () => sendToWin('update:status', { state: 'checking' }))
     waUpdater.on('update-available', (i) => sendToWin('update:status', { state: 'available', version: (i && i.version) || '' }))
     waUpdater.on('update-not-available', () => sendToWin('update:status', { state: 'latest', version: app.getVersion() }))
     waUpdater.on('download-progress', (p) => sendToWin('update:status', { state: 'downloading', percent: Math.round((p && p.percent) || 0) }))
-    waUpdater.on('update-downloaded', (i) => sendToWin('update:status', { state: 'ready', version: (i && i.version) || '' }))
+    waUpdater.on('update-downloaded', (i) => { updateReady = true; sendToWin('update:status', { state: 'ready', version: (i && i.version) || '' }) })
     waUpdater.on('error', (e) => sendToWin('update:status', { state: 'error', message: String((e && e.message) || e) }))
   } catch (e) {
     sendToWin('update:status', { state: 'error', message: 'auto-update tidak tersedia' })
@@ -242,6 +251,26 @@ async function updaterCheck (manual) {
   const u = initUpdater()
   if (!u) { sendToWin('update:status', { state: 'unavailable' }); return { ok: false, error: 'updater tidak tersedia' } }
   try { await u.checkForUpdates(); return { ok: true } } catch (e) { return { ok: false, error: String((e && e.message) || e) } }
+}
+
+// Adam: the user decides. First click downloads the installer, second click
+// (after the download finished) installs it. Nothing is fetched or installed
+// without an explicit click.
+async function updaterDownloadAndInstall () {
+  const u = initUpdater()
+  if (!u) return { ok: false, error: 'updater tidak tersedia' }
+  // Already downloaded -> this click means "pasang sekarang".
+  if (updateReady) {
+    setImmediate(() => { try { u.quitAndInstall() } catch (_) {} })
+    return { ok: true, installing: true }
+  }
+  try { await u.downloadUpdate(); return { ok: true, downloading: true } } catch (e) { return { ok: false, error: String((e && e.message) || e) } }
+}
+
+// Silent check on launch — surfaces a notification badge only. No download.
+function autoCheckOnLaunch () {
+  const t = setTimeout(() => { updaterCheck(false).catch(() => {}) }, 8000)
+  try { if (t.unref) t.unref() } catch (e) {}
 }
 
 if (!prefs.initial) prefs.initial = { enabled: false, code: '', name: '', append: true, skipGroups: true, showBadge: true }
@@ -306,6 +335,9 @@ app.on('before-quit', () => { app.isQuitting = true })
 app.whenReady().then(() => {
   // ── v2.6.0 boot: chat-initials injection loop ──
   try { startInitialLoop() } catch (_) {}
+  // v2.6.1 — silent check ~8s after launch. Surfaces a "versi baru" notice only;
+  // the user decides whether to download/install.
+  if (!process.env.WA_MULTI_SELFTEST) { try { autoCheckOnLaunch() } catch (_) {} }
 
   createWindow()
   buildTray()
@@ -999,6 +1031,11 @@ ipcMain.handle('wa-multi:getState', () => ({
   activeAccountId,
   dailyCap: prefs.dailyCap,
   theme: prefs.theme,
+  // v2.6.1 — the settings dialog reads these back, so it must reflect the SAVED
+  // prefs (not defaults). Without this the dialog always rendered empty and
+  // "Simpan" looked like it did nothing.
+  initials: Object.assign({}, prefs.initial || {}, { on: !!(prefs.initial && prefs.initial.enabled) }),
+  appVersion: (() => { try { return app.getVersion() } catch (e) { return '' } })(),
   schedules: schedules.map(s => ({
     id: s.id, label: s.label, kind: s.kind, when: s.when, status: s.status,
     accountIds: s.accounts, targetCount: s.targets.length, note: s.note || null
@@ -1116,11 +1153,20 @@ ipcMain.handle('wa-multi:licenseInfo', () => license.status())
 ipcMain.handle('wa-multi:setInitials', async (_e, cfg) => {
   try {
     const c = cfg || {}
-    prefs.initial = Object.assign({ enabled: false, code: '', name: '', append: true, skipGroups: true, showBadge: true }, prefs.initial || {}, {
-      enabled: !!c.enabled,
-      code: String(c.code == null ? (prefs.initial && prefs.initial.code) || '' : c.code).slice(0, 8),
-      name: String(c.name == null ? (prefs.initial && prefs.initial.name) || '' : c.name).slice(0, 24)
+    // Accept BOTH `enabled` and `on` — the UI historically sent `on` while this
+    // handler only read `enabled`, so !!undefined = false and the toggle never
+    // actually saved (Adam's "pengaturannya ga bisa disimpan").
+    const prev = prefs.initial || {}
+    const enabled = (c.enabled === undefined && c.on === undefined)
+      ? !!prev.enabled
+      : !!(c.enabled !== undefined ? c.enabled : c.on)
+    prefs.initial = Object.assign({ enabled: false, code: '', name: '', append: true, skipGroups: true, showBadge: true }, prev, {
+      enabled,
+      // Verbatim — the user decides the format ('/DM', 'DM', '-Dhimas').
+      code: String(c.code == null ? prev.code || '' : c.code).trim().slice(0, 12),
+      name: String(c.name == null ? prev.name || '' : c.name).slice(0, 24)
     })
+    if (c.skipGroups !== undefined) prefs.initial.skipGroups = !!c.skipGroups
     persistPrefs()
     await pushInitialConfig()
     notifyStateChanged()
@@ -1137,13 +1183,9 @@ ipcMain.handle('wa-multi:updateCheck', async (_e, manual) => {
   return r
 })
 
+// Only ever called when the user clicks "Update sekarang" in the dialog.
 ipcMain.handle('wa-multi:updateInstall', async () => {
-  try {
-    const u = initUpdater()
-    if (!u) return { ok: false, error: 'updater tidak tersedia' }
-    setImmediate(() => { try { u.quitAndInstall() } catch (_) {} })
-    return { ok: true }
-  } catch (e) { return { ok: false, error: String((e && e.message) || e) } }
+  return updaterDownloadAndInstall()
 })
 // ── END v2.6.0 IPC ─────────────────────────────────────────────
 
@@ -1708,27 +1750,51 @@ function runSelfTest () {
           r.selectNodeContents(host);r.collapse(false);var s=window.getSelection();
           s.removeAllRanges();s.addRange(r)}
         function press(){document.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))}
-        E.setCfg({enabled:true,code:'DM',append:true,skipGroups:true})
-        put('halo');press();var on=host.textContent
+        function html(){return host.innerHTML.replace(/<br\\s*\\/?>/gi,'\\n').replace(/<[^>]+>/g,'')}
+        E.setCfg({enabled:true,code:'/DM',append:true,skipGroups:true})
+        put('halo');press();var on=html()
         E.setCfg({enabled:false})
-        put('halo');press();var off=host.textContent
-        E.setCfg({enabled:true,code:'FR'});put('hai');press();var fr=host.textContent
-        E.setCfg({enabled:true,code:'DM'});put('halo /DM');press();var dbl=host.textContent
+        put('halo');press();var off=html()
+        E.setCfg({enabled:true,code:'/FR'});put('hai');press();var fr=html()
+        E.setCfg({enabled:true,code:'/DM'});put('halo /DM');press();var dbl=html()
         E.setCfg({enabled:false});host.remove()
         return{on:on,off:off,fr:fr,dbl:dbl}
       }catch(e){return{err:String(e&&e.message||e)}}})()`)
-      check('initials tag appended on send', /\/DM$/.test(String(engRun.on || '').trim()), JSON.stringify(engRun.on))
+      check('initials tag appended on send', /\n\/DM$/.test(String(engRun.on || '')), JSON.stringify(engRun.on))
+      check('initials on its own line below', String(engRun.on || '').indexOf('halo\n/DM') === 0, JSON.stringify(engRun.on))
       check('initials off = no tag', String(engRun.off || '').trim() === 'halo', JSON.stringify(engRun.off))
-      check('initials code is configurable', /\/FR$/.test(String(engRun.fr || '').trim()), JSON.stringify(engRun.fr))
+      check('initials code is configurable', /\n\/FR$/.test(String(engRun.fr || '')), JSON.stringify(engRun.fr))
       check('initials no double-tag', String(engRun.dbl || '').trim() === 'halo /DM', JSON.stringify(engRun.dbl))
+      // v2.6.1 — verbatim marker: no forced '/' prefix, no auto-adding one.
+      const verbatim = await js(`(function(){var E=window.__WA_MULTI_INITIAL_ENGINE__;if(!E)return null;
+        E.setCfg({enabled:true,code:'DM'});var m1=E.get().marker;
+        E.setCfg({enabled:true,code:'/DM'});var m2=E.get().marker;
+        E.setCfg({enabled:true,code:'-Dhimas'});var m3=E.get().marker;
+        E.setCfg({enabled:false});return {m1:m1,m2:m2,m3:m3}})()`)
+      check('marker verbatim no forced slash', !!(verbatim && verbatim.m1 === 'DM'), JSON.stringify(verbatim))
+      check('marker keeps leading slash if typed', !!(verbatim && verbatim.m2 === '/DM'), JSON.stringify(verbatim))
+      check('marker accepts arbitrary prefix', !!(verbatim && verbatim.m3 === '-Dhimas'), JSON.stringify(verbatim))
 
       // auto-update IPC surface
+      // v2.6.1 — runtime assertion: the updater object itself must be configured
+      // to never auto-download and never auto-install behind the user's back.
+      // (A source-text grep is useless here: the obfuscator renames properties.)
+      const upObj = (function () { try { return initUpdater() } catch (e) { return null } })()
+      check('updater never auto-downloads', !!(upObj && upObj.autoDownload === false), upObj ? String(upObj.autoDownload) : 'null')
+      check('updater never auto-installs on quit', !!(upObj && upObj.autoInstallOnAppQuit === false), upObj ? String(upObj.autoInstallOnAppQuit) : 'null')
+      check('download only via explicit IPC', typeof updaterDownloadAndInstall === 'function' && typeof autoCheckOnLaunch === 'function')
       const av = await js('window.waMulti.appVersion()')
-      check('appVersion reports 2.6.0', !!(av && av.ok === true && av.version === '2.6.0'), JSON.stringify(av))
+      check('appVersion reports 2.6.1', !!(av && av.ok === true && av.version === '2.6.1'), JSON.stringify(av))
       const siOn = await js('window.waMulti.setInitials({enabled:true,code:"DM",name:"Dhimas"})')
       check('setInitials persists on', !!(siOn && siOn.ok === true && siOn.initial.enabled === true && siOn.initial.code === 'DM'), JSON.stringify(siOn))
-      const siOff = await js('window.waMulti.setInitials({enabled:false,code:"DM"})')
+      const siSlash = await js('window.waMulti.setInitials({enabled:true,code:"/DM"})')
+      check('setInitials keeps verbatim slash', !!(siSlash && siSlash.ok === true && siSlash.initial.code === '/DM'), JSON.stringify(siSlash))
+      const siOff = await js('window.waMulti.setInitials({enabled:false,code:"/DM"})')
       check('setInitials toggles off', !!(siOff && siOff.ok === true && siOff.initial.enabled === false), JSON.stringify(siOff))
+      // The UI sends `on` (not `enabled`) — the handler must still persist it.
+      const siOnKey = await js('window.waMulti.setInitials({on:true,code:"/FR"})')
+      check('setInitials accepts legacy "on" key', !!(siOnKey && siOnKey.ok === true && siOnKey.initial.enabled === true && siOnKey.initial.code === '/FR'), JSON.stringify(siOnKey))
+      await js('window.waMulti.setInitials({enabled:false})')
       const uc = await js('Promise.race([window.waMulti.updateCheck(false),new Promise(r=>setTimeout(()=>r({ok:false,error:"timeout"}),8000))])')
       check('updateCheck responds', !!(uc && typeof uc.ok === 'boolean'), JSON.stringify(uc))
     } catch (e) {

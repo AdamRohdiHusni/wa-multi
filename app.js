@@ -882,21 +882,29 @@ window.waMulti.onUnread(({ accountId, unread }) => {
 })
 
 // ── v2.6.0 — Settings: chat initials + app update ─────────────
+// v2.6.1 — the initials tag sits on its OWN LINE BELOW the message, never
+// beside it, and it is used VERBATIM as typed (no forced "/" prefix).
+// Adam: "tata letak inisiasi ada di bawah bukan di samping" + "jangan auto pake /".
 function initialsPreview () {
   const el = $('initPreview')
   if (!el) return
-  const code = ($('initCode')?.value || '').trim()
+  const marker = ($('initCode')?.value || '').trim()
   const on = !!$('initOn')?.checked
-  const sample = 'Halo kak, promo hari ini ya'
-  el.innerHTML = on && code
-    ? `Contoh pesan: <i>${esc(sample)}</i> <b>/${esc(code)}</b>`
-    : `Contoh pesan: <i>${esc(sample)}</i> <span class="dim">(inisial mati)</span>`
+  const sample = 'halo kak'
+  if (on && marker) {
+    el.innerHTML = 'Pesan yang keluar nanti:<br><i>' + esc(sample) + '</i><br><b>' + esc(marker) + '</b>'
+  } else if (on) {
+    el.innerHTML = 'Pesan yang keluar nanti:<br><i>' + esc(sample) + '</i><br><span class="dim">(isi inisial lu dulu)</span>'
+  } else {
+    el.innerHTML = 'Inisial mati — pesan keluar apa adanya:<br><i>' + esc(sample) + '</i>'
+  }
 }
 
 function renderSettings () {
-  const ini = (state.initials) || {}
+  const ini = state.initials || {}
   const on = $('initOn'); const code = $('initCode'); const sg = $('initSkipGroups')
-  if (on) on.checked = !!ini.on
+  // Accept either key: main.js sends `enabled`, the UI used to send/read `on`.
+  if (on) on.checked = !!(ini.enabled !== undefined ? ini.enabled : ini.on)
   if (code && document.activeElement !== code) code.value = ini.code || ''
   if (sg) sg.checked = ini.skipGroups !== false
   const v = $('setVersion'); if (v) v.textContent = 'v' + (state.appVersion || '?')
@@ -911,38 +919,56 @@ function openSettingsDialog () {
 
 let updState = { state: 'idle' }
 function renderUpdStatus () {
-  const el = $('updStatus'); const inst = $('btnInstallUpdate')
-  if (!el) return
+  const el = $('updStatus'); const inst = $('btnInstallUpdate'); const badge = $('updBadge')
+  const st = updState.state
   const m = {
     idle: '',
     checking: '🔄 Lagi cek update...',
     latest: '✅ Udah versi terbaru' + (updState.version ? ` (v${esc(updState.version)})` : ''),
-    available: `⬇️ Versi baru v${esc(updState.version || '')} ketemu — lagi diunduh otomatis...`,
-    downloading: `⬇️ Ngunduh update... ${updState.percent || 0}%`,
-    ready: `✅ Update v${esc(updState.version || '')} siap dipasang`,
+    available: `🎉 Versi baru v${esc(updState.version || '')} udah ada — klik "Update sekarang" kalau mau`,
+    downloading: `⬇️ Ngunduh update... ${updState.percent || 0}% (jangan tutup app dulu)`,
+    ready: `✅ Update v${esc(updState.version || '')} udah keunduh — klik "Update sekarang" buat pasang`,
     error: '⚠️ ' + esc(updState.message || 'gagal cek update'),
     unavailable: '⚠️ auto-update gak tersedia di versi ini'
   }
-  el.textContent = m[updState.state] || ''
-  el.className = 'upd-status' + (updState.state === 'error' || updState.state === 'unavailable' ? ' bad' : updState.state === 'ready' ? ' good' : '')
-  if (inst) inst.classList.toggle('hidden', updState.state !== 'ready')
+  if (el) {
+    el.textContent = m[st] || ''
+    el.className = 'upd-status' + (st === 'error' || st === 'unavailable' ? ' bad' : (st === 'ready' || st === 'latest') ? ' good' : '')
+  }
+  if (inst) {
+    const showBtn = st === 'available' || st === 'downloading' || st === 'ready'
+    inst.classList.toggle('hidden', !showBtn)
+    inst.disabled = st === 'downloading'
+    inst.textContent = st === 'ready' ? '⚙️ Pasang & restart' : '⬇️ Update sekarang'
+  }
+  // Topbar badge: only while there is something the user can act on.
+  if (badge) badge.classList.toggle('hidden', !(st === 'available' || st === 'downloading' || st === 'ready'))
 }
 
 $('settingsBtn')?.addEventListener('click', openSettingsDialog)
+$('updBadge')?.addEventListener('click', () => { openSettingsDialog() })
 $('settingsClose')?.addEventListener('click', () => { $('settingsDlg').close(); window.waMulti.setOverlayOpen(false) })
 $('settingsDlg')?.addEventListener('close', () => { if (currentView === 'chat' && !document.querySelector('dialog[open]')) window.waMulti.setOverlayOpen(false) })
 $('initOn')?.addEventListener('change', initialsPreview)
 $('initCode')?.addEventListener('input', initialsPreview)
 $('settingsForm')?.addEventListener('submit', async () => {
+  // Verbatim: keep whatever the user typed, including a leading '/'.
+  const code = ($('initCode')?.value || '').trim()
   const cfg = {
+    // Send BOTH keys: main.js accepts either, but `enabled` is the canonical one.
+    enabled: !!$('initOn')?.checked,
     on: !!$('initOn')?.checked,
-    code: ($('initCode')?.value || '').trim().replace(/^\//, ''),
+    code,
     skipGroups: !!$('initSkipGroups')?.checked
   }
-  if (cfg.on && !cfg.code) { toast('⚠️ isi inisial lu dulu (mis. DM)'); $('initCode').focus(); return }
+  if (cfg.enabled && !cfg.code) { toast('⚠️ isi inisial lu dulu (mis. /DM)'); $('initCode').focus(); return }
   const r = await window.waMulti.setInitials(cfg)
   if (!r || !r.ok) { toast('⚠️ gagal simpan pengaturan'); return }
-  toast(cfg.on ? `✅ inisial chat nyala — tiap pesan ditutup /${cfg.code}` : 'inisial chat dimatiin')
+  // Confirm what actually landed on disk — no more silent no-ops.
+  const saved = (r.initial && r.initial.code) || ''
+  toast(cfg.enabled
+    ? `✅ tersimpan — tiap pesan ditutup ${saved}`
+    : '✅ tersimpan — inisial chat dimatiin')
   $('settingsDlg').close()
   window.waMulti.setOverlayOpen(false)
   refreshState()

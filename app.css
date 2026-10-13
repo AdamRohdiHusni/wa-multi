@@ -379,6 +379,18 @@ dialog .hint.small { font-size: 11.5px; margin-bottom: 6px; }
 .upd-status { font-size: 12.5px; color: var(--fg2); margin-top: 10px; min-height: 16px; line-height: 1.5; }
 .upd-status.good { color: #34d399; }
 .upd-status.bad { color: #fb7185; }
+
+/* v2.6.1 — topbar "versi baru" notice (update is opt-in, never automatic) */
+.upd-badge {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px;
+  border: 1px solid var(--accent); border-radius: 14px; cursor: pointer;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent); font-size: 12px; font-weight: 600; white-space: nowrap;
+  animation: updPulse 2.2s ease-in-out infinite;
+}
+.upd-badge:hover { background: color-mix(in srgb, var(--accent) 24%, transparent); }
+.upd-badge.hidden { display: none; }
+@keyframes updPulse { 0%,100% { opacity: 1 } 50% { opacity: .62 } }
 #settingsBtn { margin-left: 2px; }
 
 .toast {

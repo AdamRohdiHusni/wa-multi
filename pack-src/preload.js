@@ -36,8 +36,15 @@ contextBridge.exposeInMainWorld('waMulti', {
   cancelSchedule: (id) => ipcRenderer.invoke('wa-multi:cancelSchedule', id),
   deleteSchedule: (id) => ipcRenderer.invoke('wa-multi:deleteSchedule', id),
   clearHistory: () => ipcRenderer.invoke('wa-multi:clearHistory'),
+  // v2.6.0 — chat initials (multi-admin attribution on a shared number)
+  setInitials: (cfg) => ipcRenderer.invoke('wa-multi:setInitials', cfg),
+  // v2.6.0 — auto-update
+  updateCheck: (manual) => ipcRenderer.invoke('wa-multi:updateCheck', manual),
+  updateInstall: () => ipcRenderer.invoke('wa-multi:updateInstall'),
+  appVersion: () => ipcRenderer.invoke('wa-multi:appVersion'),
   // events
   onStateChanged: (cb) => ipcRenderer.on('wa-multi:stateChanged', () => cb()),
   onUnread: (cb) => ipcRenderer.on('wa-multi:unread', (_e, payload) => cb(payload)),
-  onBlastProgress: (cb) => ipcRenderer.on('wa-multi:blastProgress', (_e, payload) => cb(payload))
+  onBlastProgress: (cb) => ipcRenderer.on('wa-multi:blastProgress', (_e, payload) => cb(payload)),
+  onUpdateStatus: (cb) => ipcRenderer.on('update:status', (_e, payload) => cb(payload))
 })
