@@ -348,6 +348,39 @@ dialog .dlg-label { display: block; font-size: 12px; color: var(--fg2); margin: 
 dialog .row { justify-content: flex-end; }
 #licErr { margin-top: 8px; }
 
+/* ── v2.6.0 — settings: chat initials + app update ───────────── */
+#settingsDlg { min-width: 400px; max-width: 480px; }
+.set-block { margin-bottom: 4px; }
+.set-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.set-head b { font-size: 13.5px; }
+.set-sep { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
+.set-row { margin-bottom: 10px; }
+.set-check { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--fg2); line-height: 1.45; margin: 4px 0 10px; cursor: pointer; }
+.set-check input { width: auto; margin: 1px 0 0; }
+dialog .hint.small { font-size: 11.5px; margin-bottom: 6px; }
+.dim { color: var(--fg2); }
+
+.init-input { display: flex; align-items: center; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding-left: 12px; overflow: hidden; }
+.init-input:focus-within { border-color: var(--accent); }
+.init-input .init-slash { color: var(--accent); font-weight: 600; font-size: 15px; }
+.init-input input { border: 0; background: transparent; margin: 0; padding-left: 6px; }
+.init-input input:focus { outline: none; }
+.init-input:focus-within { border-color: var(--accent); }
+
+/* toggle switch (on/off) */
+.switch { position: relative; width: 40px; height: 22px; flex: 0 0 auto; cursor: pointer; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch .slider { position: absolute; inset: 0; background: var(--bg3); border: 1px solid var(--border); border-radius: 22px; transition: background .18s, border-color .18s; }
+.switch .slider::before { content: ''; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: var(--fg2); border-radius: 50%; transition: transform .18s, background .18s; }
+.switch input:checked + .slider { background: var(--accent2); border-color: var(--accent); }
+.switch input:checked + .slider::before { transform: translateX(18px); background: #fff; }
+.switch input:focus-visible + .slider { box-shadow: 0 0 0 2px var(--accent); }
+
+.upd-status { font-size: 12.5px; color: var(--fg2); margin-top: 10px; min-height: 16px; line-height: 1.5; }
+.upd-status.good { color: #34d399; }
+.upd-status.bad { color: #fb7185; }
+#settingsBtn { margin-left: 2px; }
+
 .toast {
   position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
   background: var(--bg3); border: 1px solid var(--border); color: var(--fg);

@@ -66,6 +66,187 @@ const savePrefs = () => writeJson(PREFS_FILE, prefs)
 const saveSchedules = () => writeJson(SCHEDULES_FILE, schedules)
 const saveHistory = () => writeJson(HISTORY_FILE, history)
 
+// ── v2.6.0 REGION A — disisipkan ke main.js sebelum blok "// prefs defaults" ──
+// Fitur: Inisial Chat (kolaborasi multi-admin) + Auto-Update (electron-updater)
+// Semua self-contained & fail-safe: kalau ada yang gagal, app tetap jalan normal.
+
+// Engine yang diinjeksi ke dalam WebContentsView WA Web (tanpa preload).
+// Dipakai string concat (bukan template literal) supaya aman saat di-obfuscate.
+const INITIAL_ENGINE = "(function(){" +
+  "if(window.__WA_MULTI_INITIAL_ENGINE__){return 'exists'}" +
+  "var CFG={enabled:false,code:'',name:'',append:true,skipGroups:true,showBadge:true};" +
+  "var STATE={last:0,appended:0};" +
+  "function isGroupChat(){try{var h=document.querySelector('#main header');if(h){" +
+  "if(h.querySelector('[data-icon=\\\"default-group\\\"],[data-icon=\\\"group\\\"]'))return true;" +
+  "var t=(h.innerText||'');if(/group info|info grup/i.test(t))return true;" +
+  "if(h.querySelector('img[src*=\\\"g.us\\\"]'))return true}}catch(e){}return false}" +
+  "function composerEl(){try{var ae=document.activeElement;if(ae&&ae.isContentEditable)return ae;" +
+  "var q=document.querySelector('#main footer div[contenteditable=\\\"true\\\"]');return q||null}catch(e){return null}}" +
+  "function textOf(el){try{return (el.innerText||el.textContent||'')}catch(e){return ''}}" +
+  "function appendCode(el,code){try{var marker='/'+code;var t=textOf(el).trim();" +
+  "if(!t)return false;" +
+  "if(t.length>=marker.length&&t.slice(0-marker.length)===marker)return false;" +
+  "el.focus();var sel=window.getSelection();var r=document.createRange();" +
+  "r.selectNodeContents(el);r.collapse(false);sel.removeAllRanges();sel.addRange(r);" +
+  "document.execCommand('insertText',false,' '+marker);STATE.last=Date.now();return true}catch(e){return false}}" +
+  "function shouldAppend(){if(!CFG.enabled||!CFG.append)return false;if(!CFG.code)return false;" +
+  "if(CFG.skipGroups&&isGroupChat())return false;return true}" +
+  "function onKey(e){try{if(e.key!=='Enter'||e.shiftKey||e.ctrlKey||e.altKey||e.metaKey)return;" +
+  "if(!shouldAppend())return;var el=composerEl();if(!el)return;" +
+  "if(appendCode(el,CFG.code))STATE.appended++}catch(err){}}" +
+  "function onClick(e){try{if(!shouldAppend())return;var t=e.target;" +
+  "var btn=t&&t.closest?t.closest('[data-testid=\\\"send\\\"],button[aria-label*=\\\"Send\\\"],button[aria-label*=\\\"Kirim\\\"],[data-icon=\\\"send\\\"]'):null;" +
+  "if(!btn)return;var el=composerEl();if(!el)return;" +
+  "if(appendCode(el,CFG.code))STATE.appended++}catch(err){}}" +
+  "window.__WA_MULTI_INITIAL_ENGINE__={setCfg:function(c){try{CFG=Object.assign(CFG,c||{})}catch(e){}}," +
+  "get:function(){return {enabled:!!CFG.enabled,code:CFG.code||'',name:CFG.name||''," +
+  "isGroup:isGroupChat(),appended:STATE.appended,lastAppend:STATE.last,ts:Date.now()}}};" +
+  "document.addEventListener('keydown',onKey,true);" +
+  "document.addEventListener('click',onClick,true);" +
+  "return 'installed'})()"
+
+const UPDATER_OWNER = 'AdamRohdiHusni'
+const UPDATER_REPO = 'wa-multi'
+
+function sendToWin(channel, payload) {
+  try {
+    const w = BrowserWindow.getAllWindows()[0]
+    if (w && !w.isDestroyed() && w.webContents) w.webContents.send(channel, payload)
+  } catch (e) {}
+}
+
+function waAllViews() {
+  try {
+    const out = []
+    if (views && typeof views.forEach === 'function') {
+      views.forEach((v) => { try { if (v && v.webContents && !v.webContents.isDestroyed()) out.push(v) } catch (e) {} })
+    } else if (views && typeof views === 'object') {
+      for (const k of Object.keys(views)) { const v = views[k]; try { if (v && v.webContents) out.push(v) } catch (e) {} }
+    }
+    return out
+  } catch (e) { return [] }
+}
+
+function persistPrefs() {
+  try { if (typeof savePrefs === 'function') { savePrefs(); return } } catch (e) {}
+  try {
+    fs.writeFileSync(path.join(app.getPath('userData'), 'prefs.json'), JSON.stringify(prefs, null, 2))
+  } catch (e) {}
+}
+
+function initialCfgJSON() {
+  try { return JSON.stringify(prefs.initial || {}) } catch (e) { return '{}' }
+}
+
+async function pushInitialConfig() {
+  const js = 'window.__WA_MULTI_INITIAL_ENGINE__ && window.__WA_MULTI_INITIAL_ENGINE__.setCfg(' + initialCfgJSON() + ')'
+  for (const v of waAllViews()) { try { await v.webContents.executeJavaScript(js) } catch (e) {} }
+}
+
+async function ensureInitialEngine() {
+  try {
+    const cfg = prefs.initial || {}
+    if (!cfg.enabled) return
+    for (const v of waAllViews()) {
+      try {
+        const engineReady = await v.webContents.executeJavaScript('!!(window.WPP && window.WPP.isInjected)').catch(() => false)
+        if (!engineReady) continue
+        const has = await v.webContents.executeJavaScript('!!window.__WA_MULTI_INITIAL_ENGINE__').catch(() => false)
+        if (!has) await v.webContents.executeJavaScript(INITIAL_ENGINE).catch(() => {})
+        await v.webContents.executeJavaScript('window.__WA_MULTI_INITIAL_ENGINE__ && window.__WA_MULTI_INITIAL_ENGINE__.setCfg(' + initialCfgJSON() + ')').catch(() => {})
+      } catch (e) {}
+    }
+  } catch (e) {}
+}
+
+let initialTimer = null
+function startInitialLoop() {
+  if (initialTimer) return
+  initialTimer = setInterval(async () => {
+    try {
+      const cfg = prefs.initial || {}
+      if (!cfg.enabled) return
+      await ensureInitialEngine()
+      if (cfg.showBadge) {
+        for (const v of waAllViews()) {
+          const r = await v.webContents.executeJavaScript('window.__WA_MULTI_INITIAL_ENGINE__ && window.__WA_MULTI_INITIAL_ENGINE__.get()').catch(() => null)
+          if (r) sendToWin('initial:attribution', r)
+        }
+      }
+    } catch (e) {}
+  }, 7000)
+  try { if (initialTimer.unref) initialTimer.unref() } catch (e) {}
+}
+
+// Sembunyikan view WA saat dialog app dibuka (view = layer di atas renderer).
+// Simpan status visible sebelumnya supaya pas ditutup balik persis seperti semula.
+let initialOverlayPrev = null
+function setInitialOverlay(open) {
+  try {
+    if (open) {
+      initialOverlayPrev = []
+      for (const [id, v] of viewsMapEntries()) {
+        let vis = true
+        try { if (typeof v.getVisible === 'function') vis = v.getVisible() } catch (e) {}
+        initialOverlayPrev.push([id, vis])
+        try { v.setVisible(false) } catch (e) {}
+      }
+    } else if (initialOverlayPrev) {
+      for (const [id, vis] of initialOverlayPrev) {
+        try { const v = mapGet(id); if (v) v.setVisible(vis) } catch (e) {}
+      }
+      initialOverlayPrev = null
+    }
+  } catch (e) {}
+}
+
+function viewsMapEntries() {
+  try {
+    if (views && typeof views.forEach === 'function') { const out = []; views.forEach((v, k) => out.push([k, v])); return out }
+    if (views && typeof views === 'object') return Object.keys(views).map((k) => [k, views[k]])
+  } catch (e) {}
+  return []
+}
+function mapGet(id) {
+  try {
+    if (views && typeof views.get === 'function') return views.get(id)
+    if (views && typeof views === 'object') return views[id]
+  } catch (e) {}
+  return null
+}
+
+let waUpdater = null
+function initUpdater() {
+  if (waUpdater) return waUpdater
+  try {
+    const eu = require('electron-updater')
+    waUpdater = eu && eu.autoUpdater
+    if (!waUpdater) throw new Error('autoUpdater tidak tersedia')
+    try { waUpdater.autoDownload = true } catch (e) {}
+    try { waUpdater.autoInstallOnAppQuit = true } catch (e) {}
+    try { waUpdater.setFeedURL({ provider: 'github', owner: UPDATER_OWNER, repo: UPDATER_REPO }) } catch (e) {}
+    waUpdater.on('checking-for-update', () => sendToWin('update:status', { state: 'checking' }))
+    waUpdater.on('update-available', (i) => sendToWin('update:status', { state: 'available', version: (i && i.version) || '' }))
+    waUpdater.on('update-not-available', () => sendToWin('update:status', { state: 'latest', version: app.getVersion() }))
+    waUpdater.on('download-progress', (p) => sendToWin('update:status', { state: 'downloading', percent: Math.round((p && p.percent) || 0) }))
+    waUpdater.on('update-downloaded', (i) => sendToWin('update:status', { state: 'ready', version: (i && i.version) || '' }))
+    waUpdater.on('error', (e) => sendToWin('update:status', { state: 'error', message: String((e && e.message) || e) }))
+  } catch (e) {
+    sendToWin('update:status', { state: 'error', message: 'auto-update tidak tersedia' })
+    waUpdater = null
+  }
+  return waUpdater
+}
+
+async function updaterCheck (manual) {
+  const u = initUpdater()
+  if (!u) { sendToWin('update:status', { state: 'unavailable' }); return { ok: false, error: 'updater tidak tersedia' } }
+  try { await u.checkForUpdates(); return { ok: true } } catch (e) { return { ok: false, error: String((e && e.message) || e) } }
+}
+
+if (!prefs.initial) prefs.initial = { enabled: false, code: '', name: '', append: true, skipGroups: true, showBadge: true }
+// ── END REGION A ──
+
 // prefs defaults
 if (!prefs.tabMode) prefs.tabMode = 'dual'   // 'dual' = pinned + 1 office | 'solo' = pinned only
 if (!prefs.layoutMode) prefs.layoutMode = 'full' // 'full' = tab-by-tab full screen (bg stays alive) | 'split' = kiri-kanan
@@ -123,6 +304,9 @@ app.isQuitting = false
 app.on('before-quit', () => { app.isQuitting = true })
 
 app.whenReady().then(() => {
+  // ── v2.6.0 boot: chat-initials injection loop ──
+  try { startInitialLoop() } catch (_) {}
+
   createWindow()
   buildTray()
   startScheduleTicker()
@@ -927,6 +1111,42 @@ ipcMain.handle('wa-multi:setTabMode', (e, mode) => {
 
 // ── licensing IPC ─────────────────────────────────────────────
 ipcMain.handle('wa-multi:licenseInfo', () => license.status())
+
+// ── v2.6.0 IPC: chat initials + auto-update ─────────────────────
+ipcMain.handle('wa-multi:setInitials', async (_e, cfg) => {
+  try {
+    const c = cfg || {}
+    prefs.initial = Object.assign({ enabled: false, code: '', name: '', append: true, skipGroups: true, showBadge: true }, prefs.initial || {}, {
+      enabled: !!c.enabled,
+      code: String(c.code == null ? (prefs.initial && prefs.initial.code) || '' : c.code).slice(0, 8),
+      name: String(c.name == null ? (prefs.initial && prefs.initial.name) || '' : c.name).slice(0, 24)
+    })
+    persistPrefs()
+    await pushInitialConfig()
+    notifyStateChanged()
+    return { ok: true, initial: prefs.initial }
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) } }
+})
+
+ipcMain.handle('wa-multi:appVersion', () => {
+  try { return { ok: true, version: app.getVersion(), name: app.getName() } } catch (e) { return { ok: false, version: '' } }
+})
+
+ipcMain.handle('wa-multi:updateCheck', async (_e, manual) => {
+  const r = await updaterCheck(!!manual)
+  return r
+})
+
+ipcMain.handle('wa-multi:updateInstall', async () => {
+  try {
+    const u = initUpdater()
+    if (!u) return { ok: false, error: 'updater tidak tersedia' }
+    setImmediate(() => { try { u.quitAndInstall() } catch (_) {} })
+    return { ok: true }
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) } }
+})
+// ── END v2.6.0 IPC ─────────────────────────────────────────────
+
 ipcMain.handle('wa-multi:activateLicense', async (e, key) => {
   const r = await license.activate(key)
   notifyStateChanged()
@@ -1464,6 +1684,53 @@ function runSelfTest () {
       await js('document.getElementById("addCancel").click()')
       await wait(250)
       check('dialog close restores views', [...views.values()].every(v => v.getBounds().width > 100))
+
+      // 19. v2.6.0 — chat initials (multi-admin attribution) + auto-update
+      check('prefs.initial defaults exist', !!(prefs.initial && typeof prefs.initial.enabled === 'boolean'), JSON.stringify(prefs.initial))
+      check('initial engine is a string', typeof INITIAL_ENGINE === 'string' && INITIAL_ENGINE.length > 500, `len=${INITIAL_ENGINE.length}`)
+      check('updater wiring present', typeof initUpdater === 'function' && typeof updaterCheck === 'function' && typeof pushInitialConfig === 'function' && typeof startInitialLoop === 'function')
+      let engOK = true, engErr = ''
+      try { new Function('return (' + INITIAL_ENGINE + ')') } catch (e) { engOK = false; engErr = e.message }
+      check('initial engine parses', engOK, engErr)
+
+      // install the engine in the renderer and drive it with a synthetic composer
+      await js(INITIAL_ENGINE)
+      const engHas = await js('!!window.__WA_MULTI_INITIAL_ENGINE__')
+      check('initial engine installs', engHas === true)
+
+      const engRun = await js(`(function(){try{
+        var host=document.getElementById('__eng_host')
+        if(!host){host=document.createElement('div');host.id='__eng_host';
+          host.setAttribute('contenteditable','true');host.style.cssText='position:fixed;left:-9999px;top:0';
+          document.body.appendChild(host)}
+        var E=window.__WA_MULTI_INITIAL_ENGINE__;if(!E)return{err:'not installed'}
+        function put(t){host.innerHTML=t;host.focus();var r=document.createRange();
+          r.selectNodeContents(host);r.collapse(false);var s=window.getSelection();
+          s.removeAllRanges();s.addRange(r)}
+        function press(){document.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))}
+        E.setCfg({enabled:true,code:'DM',append:true,skipGroups:true})
+        put('halo');press();var on=host.textContent
+        E.setCfg({enabled:false})
+        put('halo');press();var off=host.textContent
+        E.setCfg({enabled:true,code:'FR'});put('hai');press();var fr=host.textContent
+        E.setCfg({enabled:true,code:'DM'});put('halo /DM');press();var dbl=host.textContent
+        E.setCfg({enabled:false});host.remove()
+        return{on:on,off:off,fr:fr,dbl:dbl}
+      }catch(e){return{err:String(e&&e.message||e)}}})()`)
+      check('initials tag appended on send', /\/DM$/.test(String(engRun.on || '').trim()), JSON.stringify(engRun.on))
+      check('initials off = no tag', String(engRun.off || '').trim() === 'halo', JSON.stringify(engRun.off))
+      check('initials code is configurable', /\/FR$/.test(String(engRun.fr || '').trim()), JSON.stringify(engRun.fr))
+      check('initials no double-tag', String(engRun.dbl || '').trim() === 'halo /DM', JSON.stringify(engRun.dbl))
+
+      // auto-update IPC surface
+      const av = await js('window.waMulti.appVersion()')
+      check('appVersion reports 2.6.0', !!(av && av.ok === true && av.version === '2.6.0'), JSON.stringify(av))
+      const siOn = await js('window.waMulti.setInitials({enabled:true,code:"DM",name:"Dhimas"})')
+      check('setInitials persists on', !!(siOn && siOn.ok === true && siOn.initial.enabled === true && siOn.initial.code === 'DM'), JSON.stringify(siOn))
+      const siOff = await js('window.waMulti.setInitials({enabled:false,code:"DM"})')
+      check('setInitials toggles off', !!(siOff && siOff.ok === true && siOff.initial.enabled === false), JSON.stringify(siOff))
+      const uc = await js('Promise.race([window.waMulti.updateCheck(false),new Promise(r=>setTimeout(()=>r({ok:false,error:"timeout"}),8000))])')
+      check('updateCheck responds', !!(uc && typeof uc.ok === 'boolean'), JSON.stringify(uc))
     } catch (e) {
       check('harness completed without exception', false, e.message)
     }

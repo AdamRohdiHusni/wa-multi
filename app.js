@@ -142,6 +142,7 @@ async function refreshState () {
   renderHistory()
   renderTargetSummary()
   syncStage()
+  renderSettings()          // v2.6.0 — reflect initials + version in the settings dialog
 }
 
 function renderTabMode () {
@@ -879,6 +880,82 @@ window.waMulti.onUnread(({ accountId, unread }) => {
   unreadMap.set(accountId, unread)
   renderTabs()
 })
+
+// ── v2.6.0 — Settings: chat initials + app update ─────────────
+function initialsPreview () {
+  const el = $('initPreview')
+  if (!el) return
+  const code = ($('initCode')?.value || '').trim()
+  const on = !!$('initOn')?.checked
+  const sample = 'Halo kak, promo hari ini ya'
+  el.innerHTML = on && code
+    ? `Contoh pesan: <i>${esc(sample)}</i> <b>/${esc(code)}</b>`
+    : `Contoh pesan: <i>${esc(sample)}</i> <span class="dim">(inisial mati)</span>`
+}
+
+function renderSettings () {
+  const ini = (state.initials) || {}
+  const on = $('initOn'); const code = $('initCode'); const sg = $('initSkipGroups')
+  if (on) on.checked = !!ini.on
+  if (code && document.activeElement !== code) code.value = ini.code || ''
+  if (sg) sg.checked = ini.skipGroups !== false
+  const v = $('setVersion'); if (v) v.textContent = 'v' + (state.appVersion || '?')
+  initialsPreview()
+}
+
+function openSettingsDialog () {
+  renderSettings()
+  window.waMulti.setOverlayOpen(true)
+  $('settingsDlg').showModal()
+}
+
+let updState = { state: 'idle' }
+function renderUpdStatus () {
+  const el = $('updStatus'); const inst = $('btnInstallUpdate')
+  if (!el) return
+  const m = {
+    idle: '',
+    checking: '🔄 Lagi cek update...',
+    latest: '✅ Udah versi terbaru' + (updState.version ? ` (v${esc(updState.version)})` : ''),
+    available: `⬇️ Versi baru v${esc(updState.version || '')} ketemu — lagi diunduh otomatis...`,
+    downloading: `⬇️ Ngunduh update... ${updState.percent || 0}%`,
+    ready: `✅ Update v${esc(updState.version || '')} siap dipasang`,
+    error: '⚠️ ' + esc(updState.message || 'gagal cek update'),
+    unavailable: '⚠️ auto-update gak tersedia di versi ini'
+  }
+  el.textContent = m[updState.state] || ''
+  el.className = 'upd-status' + (updState.state === 'error' || updState.state === 'unavailable' ? ' bad' : updState.state === 'ready' ? ' good' : '')
+  if (inst) inst.classList.toggle('hidden', updState.state !== 'ready')
+}
+
+$('settingsBtn')?.addEventListener('click', openSettingsDialog)
+$('settingsClose')?.addEventListener('click', () => { $('settingsDlg').close(); window.waMulti.setOverlayOpen(false) })
+$('settingsDlg')?.addEventListener('close', () => { if (currentView === 'chat' && !document.querySelector('dialog[open]')) window.waMulti.setOverlayOpen(false) })
+$('initOn')?.addEventListener('change', initialsPreview)
+$('initCode')?.addEventListener('input', initialsPreview)
+$('settingsForm')?.addEventListener('submit', async () => {
+  const cfg = {
+    on: !!$('initOn')?.checked,
+    code: ($('initCode')?.value || '').trim().replace(/^\//, ''),
+    skipGroups: !!$('initSkipGroups')?.checked
+  }
+  if (cfg.on && !cfg.code) { toast('⚠️ isi inisial lu dulu (mis. DM)'); $('initCode').focus(); return }
+  const r = await window.waMulti.setInitials(cfg)
+  if (!r || !r.ok) { toast('⚠️ gagal simpan pengaturan'); return }
+  toast(cfg.on ? `✅ inisial chat nyala — tiap pesan ditutup /${cfg.code}` : 'inisial chat dimatiin')
+  $('settingsDlg').close()
+  window.waMulti.setOverlayOpen(false)
+  refreshState()
+})
+$('btnCheckUpdate')?.addEventListener('click', async () => {
+  updState = { state: 'checking' }; renderUpdStatus()
+  const r = await window.waMulti.updateCheck(true)
+  if (!r || !r.ok) { updState = { state: 'error', message: (r && r.error) || 'gagal cek update' }; renderUpdStatus() }
+})
+$('btnInstallUpdate')?.addEventListener('click', async () => {
+  await window.waMulti.updateInstall()
+})
+window.waMulti.onUpdateStatus((p) => { updState = p || {}; renderUpdStatus() })
 
 // ── boot ──────────────────────────────────────────────────────
 async function boot () {

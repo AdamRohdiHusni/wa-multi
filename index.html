@@ -48,6 +48,10 @@
       <svg id="iconMoon" width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" stroke="currentColor" stroke-width="2"/></svg>
       <svg id="iconSun" width="18" height="18" viewBox="0 0 24 24" fill="none" class="hidden"><circle cx="12" cy="12" r="4.4" stroke="currentColor" stroke-width="2"/><path d="M12 2v2.5M12 19.5V22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M2 12h2.5M19.5 12H22M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
     </button>
+
+    <button id="settingsBtn" class="icon-btn" title="Pengaturan (inisial chat &amp; update)">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z" stroke="currentColor" stroke-width="1.6"/></svg>
+    </button>
   </header>
 
   <!-- ── Tab bar: account slots ────────────────────────────── -->
@@ -265,6 +269,58 @@
       <div class="row">
         <button type="button" class="ghost-btn" id="capCancel">Batal</button>
         <button type="submit" class="primary-btn">Simpan</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="settingsDlg">
+    <form method="dialog" id="settingsForm">
+      <h3>⚙️ Pengaturan</h3>
+
+      <!-- ── Inisial chat (kolaborasi 1 nomor, banyak admin) ── -->
+      <div class="set-block">
+        <div class="set-head">
+          <b>Inisial chat</b>
+          <label class="switch" title="Aktif/nonaktif">
+            <input type="checkbox" id="initOn" />
+            <span class="slider"></span>
+          </label>
+        </div>
+        <p class="hint">Kalau 1 nomor WA dipakai rame-rame (banyak admin/laptop), tiap pesan keluar
+          otomatis ditutup inisial lu — biar ketahuan siapa yang balas. Bisa dimatiin kapan aja.</p>
+        <div class="set-row">
+          <label class="dlg-label" for="initCode">Inisial lu</label>
+          <div class="init-input">
+            <span class="init-slash">/</span>
+            <input id="initCode" class="inp" placeholder="DM" maxlength="12" autocomplete="off" />
+          </div>
+        </div>
+        <label class="set-check">
+          <input type="checkbox" id="initSkipGroups" />
+          <span>Jangan pasang inisial di chat grup (cuma chat pribadi)</span>
+        </label>
+        <p class="hint small" id="initPreview">Contoh pesan: <i>Halo kak, promo hari ini ya</i></p>
+      </div>
+
+      <hr class="set-sep" />
+
+      <!-- ── Update aplikasi ── -->
+      <div class="set-block">
+        <div class="set-head">
+          <b>Versi aplikasi</b>
+          <span class="ver" id="setVersion">v...</span>
+        </div>
+        <p class="hint">Update diunduh otomatis di belakang. Kalau udah siap, tinggal pasang — gak perlu download manual lagi.</p>
+        <div class="btn-row" style="margin-top:8px">
+          <button type="button" class="ghost-btn" id="btnCheckUpdate">🔄 Cek update</button>
+          <button type="button" class="primary-btn hidden" id="btnInstallUpdate">⬇️ Pasang update</button>
+        </div>
+        <div class="upd-status" id="updStatus"></div>
+      </div>
+
+      <div class="row" style="margin-top:14px">
+        <button type="button" class="ghost-btn" id="settingsClose">Tutup</button>
+        <button type="submit" class="primary-btn" id="settingsSave">Simpan</button>
       </div>
     </form>
   </dialog>
