@@ -24,9 +24,15 @@ app.whenReady().then(async () => {
   console.log('PROBE|config-source|', cfgSrc)
   console.log('PROBE|config-body|', fs.readFileSync(cfgSrc, 'utf8').trim().replace(/\n/g, ' | '))
 
-  // Dev config path so NsisUpdater reads our yml instead of the (absent) installed one
-  const devCfg = path.join(__dirname, '..', 'dev-app-update.yml')
-  fs.copyFileSync(cfgSrc, devCfg)
+  // Dev config path so NsisUpdater reads our yml instead of the (absent) installed one.
+  // electron-updater resolves dev-app-update.yml relative to the app path, which varies
+  // with how Electron was invoked (`npx electron tests/x.js` => tests/), so write it in
+  // BOTH the repo root and the script dir. Both are gitignored.
+  const devCfgs = [
+    path.join(__dirname, '..', 'dev-app-update.yml'),
+    path.join(__dirname, 'dev-app-update.yml')
+  ]
+  for (const c of devCfgs) { try { fs.copyFileSync(cfgSrc, c) } catch (e) {} }
 
   const up = new NsisUpdater()
   up.forceDevUpdateConfig = true
@@ -40,9 +46,10 @@ app.whenReady().then(async () => {
   const origRuntime = up.createProviderRuntimeOptions.bind(up)
   up.createProviderRuntimeOptions = () => ({ ...origRuntime(), platform: 'win32' })
 
-  // Pretend we are an OLD install (2.5.2) so the feed has to actually offer 2.6.0.
-  // An 'update-available' verdict with latest=2.6.0 is the strongest possible proof:
-  // it exercises provider resolve + YAML parse + semver compare end-to-end.
+  // Pretend we are the version Adam actually has installed (2.6.0) so the feed has
+  // to offer the real newest release. An 'update-available' verdict with latest=2.6.1
+  // is the strongest possible proof: provider resolve + YAML parse + semver compare,
+  // end-to-end, on exactly the upgrade path a user will take.
   // Both `app.version` (string, used for blockmap/compare) and `currentVersion`
   // (SemVer instance) must agree, otherwise semver throws "Invalid version".
   try {
@@ -50,10 +57,10 @@ app.whenReady().then(async () => {
     // from the top-level node_modules produces a SemVer object that fails the nested
     // module's `instanceof` check -> "Invalid version. Must be a string."
     const semver = require('electron-updater/node_modules/semver')
-    Object.defineProperty(up.app, 'version', { value: '2.5.2', configurable: true })
-    up.currentVersion = semver.parse('2.5.2')
+    Object.defineProperty(up.app, 'version', { value: '2.6.0', configurable: true })
+    up.currentVersion = semver.parse('2.6.0')
     up.allowPrerelease = false
-    console.log('PROBE|simulated-current| 2.5.2')
+    console.log('PROBE|simulated-current| 2.6.0')
   } catch (e) { console.log('PROBE|semver-override-failed|', String(e.message)) }
 
   up.logger = {
