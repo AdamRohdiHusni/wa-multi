@@ -88,6 +88,11 @@ const INITIAL_ENGINE =   "(function(){" +
   "function lexEditorOf(el){try{return (el&&el.__lexicalEditor)||null}catch(e){return null}}" +
   "function lexAppend(el,m){var ed=lexEditorOf(el);if(!ed||typeof ed.update!=='function')return 'no-editor';" +
   "var done=false;try{ed.update(function(){var st=ed._pendingEditorState||ed._editorState;" +
+  // v2.6.3 FIX: insert at the END of the message, NEVER at the caret. If the user's caret
+  // is mid-text, insertLineBreak() splits the paragraph there and the tag lands in the
+  // MIDDLE of the message. Force the selection to the document end first.
+  "var root=null;try{root=st&&st._nodeMap&&st._nodeMap.get('root')}catch(e){}" +
+  "if(root&&typeof root.selectEnd==='function'){try{root.selectEnd()}catch(e){}}" +
   "var sel=st&&st._selection;if(!sel)return;" +
   "if(typeof sel.insertLineBreak==='function')sel.insertLineBreak();" +
   "if(typeof sel.insertText==='function')sel.insertText(m);done=true},{discrete:true})}catch(e){return 'ERR:'+e.message}" +
@@ -1865,7 +1870,8 @@ function runSelfTest () {
           insertText:function(t){calls.push('text:'+t)}
         }
         var fakeEd={
-          _pendingEditorState:{_selection:fakeSel},
+          _pendingEditorState:{_selection:fakeSel,_nodeMap:{get:function(k){
+            return k==='root'?{selectEnd:function(){calls.push('selectEnd')}}:null}}},
           _editorState:{_selection:fakeSel},
           update:function(fn,opts){calls.push('update');fn();return true}
         }
@@ -1884,6 +1890,11 @@ function runSelfTest () {
       check('lexical line break inserted', lc.indexOf('linebreak') >= 0, JSON.stringify(lc))
       check('lexical marker text inserted', lc.some(c => c === 'text:/DM'), JSON.stringify(lc))
       check('lexical path reported as method', !!(lexProbe && lexProbe.method === 'ok'), JSON.stringify(lexProbe))
+      // v2.6.3 REGRESSION — Adam's field bug: with the caret parked in the MIDDLE of a long
+      // message, insertLineBreak() splits the paragraph at the caret and the tag lands
+      // mid-text ("...minimal 2 jam/sesi" / "DM dengan SOW 4 Sesi"). The engine must force
+      // the selection to the document END before inserting.
+      check('selection forced to end before insert (v2.6.3)', lc.indexOf('selectEnd') >= 0, JSON.stringify(lc))
 
       // engine must NOT gate itself behind WPP (the v2.6.1 "never activates" bug):
       // ensureInitialEngine must accept a WA view that has no WPP injected.
@@ -1899,7 +1910,7 @@ function runSelfTest () {
       check('updater never auto-installs on quit', !!(upObj && upObj.autoInstallOnAppQuit === false), upObj ? String(upObj.autoInstallOnAppQuit) : 'null')
       check('download only via explicit IPC', typeof updaterDownloadAndInstall === 'function' && typeof autoCheckOnLaunch === 'function')
       const av = await js('window.waMulti.appVersion()')
-      check('appVersion reports 2.6.2', !!(av && av.ok === true && av.version === '2.6.2'), JSON.stringify(av))
+      check('appVersion reports 2.6.3', !!(av && av.ok === true && av.version === '2.6.3'), JSON.stringify(av))
       // v2.6.2 — live engine status surface (settings dialog shows "aktif di N akun")
       const istat = await js('window.waMulti.initialStatus()')
       check('initialStatus reports shape', !!(istat && istat.ok === true && typeof istat.armed === 'number' && typeof istat.total === 'number' && Array.isArray(istat.views)), JSON.stringify(istat))
