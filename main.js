@@ -75,7 +75,7 @@ const saveHistory = () => writeJson(HISTORY_FILE, history)
 const INITIAL_ENGINE =   "(function(){" +
   "if(window.__WA_MULTI_INITIAL_ENGINE__){return 'exists'}" +
   "var CFG={enabled:false,code:'',name:'',append:true,skipGroups:true,showBadge:true};" +
-  "var STATE={last:0,appended:0};" +
+  "var STATE={last:0,appended:0,method:''};" +
   "function isGroupChat(){try{var h=document.querySelector('#main header');if(h){" +
   "if(h.querySelector('[data-icon=\"default-group\"],[data-icon=\"group\"]'))return true;" +
   "var t=(h.innerText||'');if(/group info|info grup/i.test(t))return true;" +
@@ -85,15 +85,23 @@ const INITIAL_ENGINE =   "(function(){" +
   "function textOf(el){try{return (el.innerText||el.textContent||'')}catch(e){return ''}}" +
   "function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}" +
   "function marker(){try{return String(CFG.code||'').trim()}catch(e){return ''}}" +
-  "function appendCode(el){try{var m=marker();if(!m)return false;" +
-  "var t=textOf(el).replace(/\\s+$/,'');" +
-  "if(!t)return false;" +
-  "if(t.slice(0-m.length)===m)return false;" +
-  "el.focus();var sel=window.getSelection();var r=document.createRange();" +
+  "function lexEditorOf(el){try{return (el&&el.__lexicalEditor)||null}catch(e){return null}}" +
+  "function lexAppend(el,m){var ed=lexEditorOf(el);if(!ed||typeof ed.update!=='function')return 'no-editor';" +
+  "var done=false;try{ed.update(function(){var st=ed._pendingEditorState||ed._editorState;" +
+  "var sel=st&&st._selection;if(!sel)return;" +
+  "if(typeof sel.insertLineBreak==='function')sel.insertLineBreak();" +
+  "if(typeof sel.insertText==='function')sel.insertText(m);done=true},{discrete:true})}catch(e){return 'ERR:'+e.message}" +
+  "return done?'ok':'no-sel'}" +
+  "function domAppend(el,m){el.focus();var sel=window.getSelection();var r=document.createRange();" +
   "r.selectNodeContents(el);r.collapse(false);sel.removeAllRanges();sel.addRange(r);" +
   "var ok=false;try{ok=document.execCommand('insertHTML',false,'<br>'+esc(m))}catch(e){}" +
   "if(!ok){try{ok=document.execCommand('insertText',false,'\\n'+m)}catch(e){}}" +
-  "STATE.last=Date.now();return !!ok}catch(e){return false}}" +
+  "return ok?'dom':'dom-fail'}" +
+  "function appendCode(el){try{var m=marker();if(!m)return false;" +
+  "var t=textOf(el).replace(/\\s+$/,'');if(!t)return false;" +
+  "if(t.slice(0-m.length)===m)return false;" +
+  "var r=lexAppend(el,m);if(r!=='ok')r=domAppend(el,m);" +
+  "STATE.method=r;STATE.last=Date.now();return (r==='ok'||r==='dom')}catch(e){return false}}" +
   "function shouldAppend(){if(!CFG.enabled)return false;if(!marker())return false;" +
   "if(CFG.skipGroups&&isGroupChat())return false;return true}" +
   "function onKey(e){try{if(e.key!=='Enter'||e.shiftKey||e.ctrlKey||e.altKey||e.metaKey)return;" +
@@ -105,7 +113,8 @@ const INITIAL_ENGINE =   "(function(){" +
   "if(appendCode(el))STATE.appended++}catch(err){}}" +
   "window.__WA_MULTI_INITIAL_ENGINE__={setCfg:function(c){try{CFG=Object.assign(CFG,c||{})}catch(e){}}," +
   "get:function(){return {enabled:!!CFG.enabled,code:CFG.code||'',marker:marker(),name:CFG.name||''," +
-  "isGroup:isGroupChat(),appended:STATE.appended,lastAppend:STATE.last,ts:Date.now()}}};" +
+  "isGroup:isGroupChat(),appended:STATE.appended,lastAppend:STATE.last,method:STATE.method,ts:Date.now()}}," +
+  "probe:function(){var el=composerEl();return {hasComposer:!!el,hasEditor:!!lexEditorOf(el)}}};" +
   "document.addEventListener('keydown',onKey,true);" +
   "document.addEventListener('click',onClick,true);" +
   "return 'installed'})()"
@@ -154,8 +163,12 @@ async function ensureInitialEngine() {
     if (!cfg.enabled) return
     for (const v of waAllViews()) {
       try {
-        const engineReady = await v.webContents.executeJavaScript('!!(window.WPP && window.WPP.isInjected)').catch(() => false)
-        if (!engineReady) continue
+        // NOTE (v2.6.2): JANGAN gate di window.WPP.isInjected. WPP cuma kepasang kalau
+        // user pernah blast — kalau tidak, fitur inisial tidak pernah aktif sama sekali.
+        const isWa = await v.webContents.executeJavaScript(
+          "!!document.querySelector('#main') || location.hostname==='web.whatsapp.com'"
+        ).catch(() => false)
+        if (!isWa) continue
         const has = await v.webContents.executeJavaScript('!!window.__WA_MULTI_INITIAL_ENGINE__').catch(() => false)
         if (!has) await v.webContents.executeJavaScript(INITIAL_ENGINE).catch(() => {})
         await v.webContents.executeJavaScript('window.__WA_MULTI_INITIAL_ENGINE__ && window.__WA_MULTI_INITIAL_ENGINE__.setCfg(' + initialCfgJSON() + ')').catch(() => {})
@@ -333,7 +346,12 @@ app.isQuitting = false
 app.on('before-quit', () => { app.isQuitting = true })
 
 app.whenReady().then(() => {
-  // ── v2.6.0 boot: chat-initials injection loop ──
+  // ── v2.6.2 boot ──
+  // Fix notif Windows yang tampil sebagai "electron waweb.js": set AppUserModelID +
+  // nama app SEBELUM window/notif dibuat. Tanpa ini Windows memakai identitas default
+  // Electron (electron.<file>.js) di Action Center.
+  try { if (process.platform === 'win32') app.setAppUserModelId('id.mysuki.wamulti') } catch (_) {}
+  try { app.setName('WA Multi') } catch (_) {}
   try { startInitialLoop() } catch (_) {}
   // v2.6.1 — silent check ~8s after launch. Surfaces a "versi baru" notice only;
   // the user decides whether to download/install.
@@ -466,7 +484,29 @@ function createView (accountId) {
   views.set(accountId, view)
   win.contentView.addChildView(view)
   view.setBounds(viewBounds(accountId))
+  // v2.6.2 — pasang engine inisial SEGERA saat WA Web selesai load.
+  // Sebelumnya cuma mengandalkan loop 7 detik + gate WPP (lihat ensureInitialEngine),
+  // jadi user yang tidak pernah blast tidak pernah dapat fitur ini.
+  try {
+    view.webContents.on('did-finish-load', () => {
+      try { if ((prefs.initial || {}).enabled) injectInitialEngine(view) } catch (_) {}
+    })
+    view.webContents.on('did-navigate', () => {
+      try { if ((prefs.initial || {}).enabled) setTimeout(() => injectInitialEngine(view), 3000) } catch (_) {}
+    })
+  } catch (_) {}
   return view
+}
+
+// v2.6.2 — idempotent: pasang engine + dorong config ke satu view (tanpa gate WPP).
+async function injectInitialEngine (view) {
+  try {
+    if (!view || !view.webContents || view.webContents.isDestroyed()) return
+    if (!(prefs.initial || {}).enabled) return
+    const has = await view.webContents.executeJavaScript('!!window.__WA_MULTI_INITIAL_ENGINE__').catch(() => false)
+    if (!has) await view.webContents.executeJavaScript(INITIAL_ENGINE).catch(() => {})
+    await view.webContents.executeJavaScript('window.__WA_MULTI_INITIAL_ENGINE__ && window.__WA_MULTI_INITIAL_ENGINE__.setCfg(' + initialCfgJSON() + ')').catch(() => {})
+  } catch (e) {}
 }
 
 function destroyView (accountId) {
@@ -1174,6 +1214,36 @@ ipcMain.handle('wa-multi:setInitials', async (_e, cfg) => {
   } catch (e) { return { ok: false, error: String((e && e.message) || e) } }
 })
 
+ipcMain.handle('wa-multi:initialStatus', async () => {
+  // v2.6.2 — lets the settings dialog show whether the engine is ACTUALLY armed on a
+  // live WhatsApp view. Without this Adam had no way to tell "saved but not running"
+  // from "running", which is what made the v2.6.1 bug so hard to see from his side.
+  try {
+    const cfg = prefs.initial || {}
+    const out = { ok: true, enabled: !!cfg.enabled, code: cfg.code || '', views: [], armed: 0, total: 0, reason: '' }
+    const views = waAllViews()
+    out.total = views.length
+    if (!cfg.enabled) out.reason = 'inisial mati'
+    else if (!views.length) out.reason = 'belum ada akun WA yang kebuka'
+    for (const v of views) {
+      let s = null
+      try {
+        s = await v.webContents.executeJavaScript(`(function(){try{
+          var E = window.__WA_MULTI_INITIAL_ENGINE__
+          if (!E) return { armed:false, reason:'engine belum kepasang' }
+          var g = E.get() || {}
+          var p = (E.probe && E.probe()) || {}
+          return { armed:true, enabled:!!g.enabled, code:g.code||'', appended:g.appended||0, method:g.method||'', hasComposer:!!p.hasComposer, hasEditor:!!p.hasEditor }
+        }catch(e){return { armed:false, reason:String(e&&e.message||e)}}})()`)
+      } catch (e) { s = { armed: false, reason: String((e && e.message) || e) } }
+      out.views.push(s)
+      if (s && s.armed && s.enabled) out.armed++
+    }
+    if (cfg.enabled && views.length && out.armed === 0) out.reason = 'engine belum nyala di halaman WA'
+    return out
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) } }
+})
+
 ipcMain.handle('wa-multi:appVersion', () => {
   try { return { ok: true, version: app.getVersion(), name: app.getName() } } catch (e) { return { ok: false, version: '' } }
 })
@@ -1775,6 +1845,51 @@ function runSelfTest () {
       check('marker keeps leading slash if typed', !!(verbatim && verbatim.m2 === '/DM'), JSON.stringify(verbatim))
       check('marker accepts arbitrary prefix', !!(verbatim && verbatim.m3 === '-Dhimas'), JSON.stringify(verbatim))
 
+      // v2.6.2 REGRESSION — the v2.6.1 bug: WhatsApp Web's composer is a Lexical editor,
+      // and Lexical REVERTS document.execCommand('insertHTML') (it returns true but the
+      // content is discarded on reconcile). A plain contenteditable composer (used by the
+      // checks above) does NOT reproduce that, which is exactly how the bug shipped.
+      // Here we install a FAKE Lexical editor whose update() records the calls. The engine
+      // must drive it via the Lexical path — execCommand-only would leave lexCalls empty.
+      const lexProbe = await js(`(function(){try{
+        var E=window.__WA_MULTI_INITIAL_ENGINE__;if(!E)return{err:'not installed'}
+        var host=document.getElementById('__lex_host')
+        if(host)host.remove()
+        host=document.createElement('div');host.id='__lex_host'
+        host.setAttribute('contenteditable','true')
+        host.style.cssText='position:fixed;left:-9999px;top:0'
+        document.body.appendChild(host)
+        var calls=[]
+        var fakeSel={
+          insertLineBreak:function(){calls.push('linebreak')},
+          insertText:function(t){calls.push('text:'+t)}
+        }
+        var fakeEd={
+          _pendingEditorState:{_selection:fakeSel},
+          _editorState:{_selection:fakeSel},
+          update:function(fn,opts){calls.push('update');fn();return true}
+        }
+        host.__lexicalEditor=fakeEd
+        host.focus()
+        E.setCfg({enabled:true,code:'/DM',append:true,skipGroups:false})
+        // simulate: user typed text then pressed Enter
+        host.innerHTML='halo kak'
+        document.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))
+        var out={calls:calls.slice(),method:(E.get()||{}).method}
+        E.setCfg({enabled:false});host.remove()
+        return out
+      }catch(e){return{err:String(e&&e.message||e)}}})()`)
+      const lc = (lexProbe && lexProbe.calls) || []
+      check('lexical path used (update called)', lc.indexOf('update') >= 0, JSON.stringify(lexProbe))
+      check('lexical line break inserted', lc.indexOf('linebreak') >= 0, JSON.stringify(lc))
+      check('lexical marker text inserted', lc.some(c => c === 'text:/DM'), JSON.stringify(lc))
+      check('lexical path reported as method', !!(lexProbe && lexProbe.method === 'ok'), JSON.stringify(lexProbe))
+
+      // engine must NOT gate itself behind WPP (the v2.6.1 "never activates" bug):
+      // ensureInitialEngine must accept a WA view that has no WPP injected.
+      check('initial engine does not require WPP', !/WPP\s*&&\s*window\.WPP\.isInjected/.test(String(ensureInitialEngine)), 'WPP gate still present in ensureInitialEngine')
+      check('injectInitialEngine exists', typeof injectInitialEngine === 'function')
+
       // auto-update IPC surface
       // v2.6.1 — runtime assertion: the updater object itself must be configured
       // to never auto-download and never auto-install behind the user's back.
@@ -1784,7 +1899,12 @@ function runSelfTest () {
       check('updater never auto-installs on quit', !!(upObj && upObj.autoInstallOnAppQuit === false), upObj ? String(upObj.autoInstallOnAppQuit) : 'null')
       check('download only via explicit IPC', typeof updaterDownloadAndInstall === 'function' && typeof autoCheckOnLaunch === 'function')
       const av = await js('window.waMulti.appVersion()')
-      check('appVersion reports 2.6.1', !!(av && av.ok === true && av.version === '2.6.1'), JSON.stringify(av))
+      check('appVersion reports 2.6.2', !!(av && av.ok === true && av.version === '2.6.2'), JSON.stringify(av))
+      // v2.6.2 — live engine status surface (settings dialog shows "aktif di N akun")
+      const istat = await js('window.waMulti.initialStatus()')
+      check('initialStatus reports shape', !!(istat && istat.ok === true && typeof istat.armed === 'number' && typeof istat.total === 'number' && Array.isArray(istat.views)), JSON.stringify(istat))
+      check('initialStatus explains why when idle', !!(istat && (istat.enabled || istat.reason)), JSON.stringify(istat && istat.reason))
+
       const siOn = await js('window.waMulti.setInitials({enabled:true,code:"DM",name:"Dhimas"})')
       check('setInitials persists on', !!(siOn && siOn.ok === true && siOn.initial.enabled === true && siOn.initial.code === 'DM'), JSON.stringify(siOn))
       const siSlash = await js('window.waMulti.setInitials({enabled:true,code:"/DM"})')

@@ -38,6 +38,9 @@ contextBridge.exposeInMainWorld('waMulti', {
   clearHistory: () => ipcRenderer.invoke('wa-multi:clearHistory'),
   // v2.6.0 — chat initials (multi-admin attribution on a shared number)
   setInitials: (cfg) => ipcRenderer.invoke('wa-multi:setInitials', cfg),
+  // v2.6.2 — live engine status, so the dialog can show "aktif di N akun" instead of
+  // making the user guess whether the tag is really running on the WhatsApp page.
+  initialStatus: () => ipcRenderer.invoke('wa-multi:initialStatus'),
   // v2.6.0 — auto-update
   updateCheck: (manual) => ipcRenderer.invoke('wa-multi:updateCheck', manual),
   updateInstall: () => ipcRenderer.invoke('wa-multi:updateInstall'),

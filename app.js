@@ -900,6 +900,29 @@ function initialsPreview () {
   }
 }
 
+async function renderInitStatus () {
+  // v2.6.2 — show whether the tag engine is REALLY running on the WhatsApp pages,
+  // not just whether the setting was saved. This is what tells Adam the difference.
+  const el = $('initStatus')
+  if (!el || !window.waMulti.initialStatus) return
+  try {
+    const s = await window.waMulti.initialStatus()
+    if (!s || !s.ok) { el.className = 'init-status bad'; el.textContent = 'Status: gagal cek engine'; return }
+    if (!s.enabled) { el.className = 'init-status'; el.textContent = 'Status: inisial mati (gak ada tag yang dipasang)'; return }
+    if (!s.total) { el.className = 'init-status bad'; el.textContent = 'Status: belum ada akun WA yang kebuka — buka akun dulu'; return }
+    if (s.armed > 0) {
+      el.className = 'init-status good'
+      el.textContent = `✅ Aktif di ${s.armed}/${s.total} akun — tag "${s.code}" bakal nempel di baris bawah tiap lu kirim`
+    } else {
+      el.className = 'init-status bad'
+      el.textContent = '⚠️ ' + (s.reason || 'engine belum nyala') + ' — coba tutup & buka lagi akunnya'
+    }
+  } catch (e) {
+    el.className = 'init-status bad'
+    el.textContent = 'Status: error ' + String((e && e.message) || e)
+  }
+}
+
 function renderSettings () {
   const ini = state.initials || {}
   const on = $('initOn'); const code = $('initCode'); const sg = $('initSkipGroups')
@@ -909,6 +932,7 @@ function renderSettings () {
   if (sg) sg.checked = ini.skipGroups !== false
   const v = $('setVersion'); if (v) v.textContent = 'v' + (state.appVersion || '?')
   initialsPreview()
+  renderInitStatus()
 }
 
 function openSettingsDialog () {
@@ -966,8 +990,14 @@ $('settingsForm')?.addEventListener('submit', async () => {
   if (!r || !r.ok) { toast('⚠️ gagal simpan pengaturan'); return }
   // Confirm what actually landed on disk — no more silent no-ops.
   const saved = (r.initial && r.initial.code) || ''
+  // v2.6.2 — and confirm the engine is really armed, not merely saved.
+  let extra = ''
+  try {
+    const s = await window.waMulti.initialStatus()
+    if (cfg.enabled && s && s.ok) extra = s.armed > 0 ? ` — aktif di ${s.armed}/${s.total} akun ✅` : ' — ⚠️ engine belum nyala, buka ulang akunnya'
+  } catch (_) {}
   toast(cfg.enabled
-    ? `✅ tersimpan — tiap pesan ditutup ${saved}`
+    ? `✅ tersimpan — tiap pesan ditutup ${saved}${extra}`
     : '✅ tersimpan — inisial chat dimatiin')
   $('settingsDlg').close()
   window.waMulti.setOverlayOpen(false)

@@ -380,6 +380,11 @@ dialog .hint.small { font-size: 11.5px; margin-bottom: 6px; }
 .upd-status.good { color: #34d399; }
 .upd-status.bad { color: #fb7185; }
 
+/* v2.6.2 — live initials engine status in the settings dialog */
+.init-status { font-size: 12.5px; color: var(--fg2); margin-top: 8px; line-height: 1.5; }
+.init-status.good { color: #34d399; }
+.init-status.bad { color: #fb7185; }
+
 /* v2.6.1 — topbar "versi baru" notice (update is opt-in, never automatic) */
 .upd-badge {
   display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px;
