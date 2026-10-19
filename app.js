@@ -211,9 +211,13 @@ function openCtxMenu (x, y, account) {
     : account.isPin2
       ? '📌 Lepas pin (ke-2)'
       : (canPinMore ? '📌 Pin ke-' + (pinsUsed + 1) + ' — tetap hidup di background' : '📌 Pin (penuh — lepas pin lain dulu)')
+  const personalLabel = account.personal
+    ? '🏠 Lepas pribadi — tag inisial aktif lagi'
+    : '🏠 Tandai pribadi — tanpa tag inisial'
   m.innerHTML = `
     <div class="acc-item${!account.isPinned && !account.isPin2 && !canPinMore ? ' disabled' : ''}" data-act="pin">${pinLabel}</div>
     ${account.slot && !account.isPinned && !account.isPin2 ? '<div class="acc-item" data-act="park">💤 Parkir tab ini</div>' : ''}
+    <div class="acc-item" data-act="personal">${personalLabel}</div>
     <div class="acc-item" data-act="ren">✎ Ganti nama</div>
     <div class="acc-item" data-act="del">🗑 Hapus akun</div>`
   m.addEventListener('click', async (e) => {
@@ -229,6 +233,7 @@ function openCtxMenu (x, y, account) {
       refreshState()
     }
     if (act === 'park') { await window.waMulti.parkAccount(account.id); refreshState() }
+    if (act === 'personal') { await window.waMulti.setPersonal(account.id, !account.personal); refreshState() }
     if (act === 'ren') openRenameDialog(account.id, account.name)
     if (act === 'del') {
       if (!confirm2(m, account)) return
@@ -912,7 +917,8 @@ async function renderInitStatus () {
     if (!s.total) { el.className = 'init-status bad'; el.textContent = 'Status: belum ada akun WA yang kebuka — buka akun dulu'; return }
     if (s.armed > 0) {
       el.className = 'init-status good'
-      el.textContent = `✅ Aktif di ${s.armed}/${s.total} akun — tag "${s.code}" bakal nempel di baris bawah tiap lu kirim`
+      const skip = s.personalSkipped > 0 ? ` (${s.personalSkipped} akun pribadi di-skip)` : ''
+      el.textContent = `✅ Aktif di ${s.armed}/${s.total} akun${skip} — tag "${s.code}" bakal nempel di baris bawah tiap lu kirim`
     } else {
       el.className = 'init-status bad'
       el.textContent = '⚠️ ' + (s.reason || 'engine belum nyala') + ' — coba tutup & buka lagi akunnya'

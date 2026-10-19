@@ -46,8 +46,8 @@ app.whenReady().then(async () => {
   const origRuntime = up.createProviderRuntimeOptions.bind(up)
   up.createProviderRuntimeOptions = () => ({ ...origRuntime(), platform: 'win32' })
 
-  // Pretend we are the version Adam actually has installed (2.6.2) so the feed has
-  // to offer the real newest release. An 'update-available' verdict with latest=2.6.3
+  // Pretend we are the version Adam actually has installed (2.6.3) so the feed has
+  // to offer the real newest release. An 'update-available' verdict with latest=2.6.4
   // is the strongest possible proof: provider resolve + YAML parse + semver compare,
   // end-to-end, on exactly the upgrade path a user will take.
   // Both `app.version` (string, used for blockmap/compare) and `currentVersion`
@@ -57,10 +57,10 @@ app.whenReady().then(async () => {
     // from the top-level node_modules produces a SemVer object that fails the nested
     // module's `instanceof` check -> "Invalid version. Must be a string."
     const semver = require('electron-updater/node_modules/semver')
-    Object.defineProperty(up.app, 'version', { value: '2.6.2', configurable: true })
-    up.currentVersion = semver.parse('2.6.2')
+    Object.defineProperty(up.app, 'version', { value: '2.6.3', configurable: true })
+    up.currentVersion = semver.parse('2.6.3')
     up.allowPrerelease = false
-    console.log('PROBE|simulated-current| 2.6.2')
+    console.log('PROBE|simulated-current| 2.6.3')
   } catch (e) { console.log('PROBE|semver-override-failed|', String(e.message)) }
 
   up.logger = {

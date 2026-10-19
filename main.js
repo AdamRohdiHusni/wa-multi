@@ -88,7 +88,7 @@ const INITIAL_ENGINE =   "(function(){" +
   "function lexEditorOf(el){try{return (el&&el.__lexicalEditor)||null}catch(e){return null}}" +
   "function lexAppend(el,m){var ed=lexEditorOf(el);if(!ed||typeof ed.update!=='function')return 'no-editor';" +
   "var done=false;try{ed.update(function(){var st=ed._pendingEditorState||ed._editorState;" +
-  // v2.6.3 FIX: insert at the END of the message, NEVER at the caret. If the user's caret
+  // v2.6.4 FIX: insert at the END of the message, NEVER at the caret. If the user's caret
   // is mid-text, insertLineBreak() splits the paragraph there and the tag lands in the
   // MIDDLE of the message. Force the selection to the document end first.
   "var root=null;try{root=st&&st._nodeMap&&st._nodeMap.get('root')}catch(e){}" +
@@ -146,6 +146,21 @@ function waAllViews() {
   } catch (e) { return [] }
 }
 
+// v2.6.4 — personal-account flag. SEPARATE from pinning: pin = akun tetap hidup di
+// background; personal = tag inisial TIDAK BOLEH dipasang di nomor ini (Adam: "bukan
+// di nomor yang di pin, tapi spesifik nomor pribadi"). Stored per-account in accounts.json.
+function viewAccountId (v) {
+  try { for (const [id, vv] of viewsMapEntries()) { if (vv === v) return id } } catch (e) {}
+  return null
+}
+function isPersonalAccount (id) {
+  try { const a = accounts.find(x => x.id === id); return !!(a && a.personal) } catch (e) { return false }
+}
+function isPersonalView (v) {
+  const id = viewAccountId(v)
+  return !!id && isPersonalAccount(id)
+}
+
 function persistPrefs() {
   try { if (typeof savePrefs === 'function') { savePrefs(); return } } catch (e) {}
   try {
@@ -159,7 +174,7 @@ function initialCfgJSON() {
 
 async function pushInitialConfig() {
   const js = 'window.__WA_MULTI_INITIAL_ENGINE__ && window.__WA_MULTI_INITIAL_ENGINE__.setCfg(' + initialCfgJSON() + ')'
-  for (const v of waAllViews()) { try { await v.webContents.executeJavaScript(js) } catch (e) {} }
+  for (const v of waAllViews()) { if (isPersonalView(v)) continue; try { await v.webContents.executeJavaScript(js) } catch (e) {} }
 }
 
 async function ensureInitialEngine() {
@@ -168,6 +183,8 @@ async function ensureInitialEngine() {
     if (!cfg.enabled) return
     for (const v of waAllViews()) {
       try {
+        // v2.6.4 — akun pribadi: JANGAN pasang engine inisial di nomor ini sama sekali.
+        if (isPersonalView(v)) continue
         // NOTE (v2.6.2): JANGAN gate di window.WPP.isInjected. WPP cuma kepasang kalau
         // user pernah blast — kalau tidak, fitur inisial tidak pernah aktif sama sekali.
         const isWa = await v.webContents.executeJavaScript(
@@ -192,6 +209,7 @@ function startInitialLoop() {
       await ensureInitialEngine()
       if (cfg.showBadge) {
         for (const v of waAllViews()) {
+          if (isPersonalView(v)) continue
           const r = await v.webContents.executeJavaScript('window.__WA_MULTI_INITIAL_ENGINE__ && window.__WA_MULTI_INITIAL_ENGINE__.get()').catch(() => null)
           if (r) sendToWin('initial:attribution', r)
         }
@@ -1064,6 +1082,7 @@ ipcMain.handle('wa-multi:getState', () => ({
   accounts: accounts.map(a => ({
     id: a.id, name: a.name, color: a.color || null,
     lastOpened: a.lastOpened || null,
+    personal: !!a.personal,
     isPinned: prefs.pinnedId === a.id,
     slot: slotOf.get(a.id) || null,
     alive: views.has(a.id),
@@ -1099,7 +1118,7 @@ ipcMain.handle('wa-multi:addAccount', (e, name) => {
   const id = 'acc-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
   const palette = ['#25d366', '#34b7f1', '#f15f6d', '#f2a33c', '#a78bfa', '#2dd4bf']
   const color = palette[accounts.length % palette.length]
-  accounts.push({ id, name: String(name || ('Akun ' + (accounts.length + 1))).trim(), color })
+  accounts.push({ id, name: String(name || ('Akun ' + (accounts.length + 1))).trim(), color, personal: false })
   saveAccounts()
   notifyStateChanged()
   return { ok: true, id }
@@ -1175,6 +1194,30 @@ ipcMain.handle('wa-multi:setPinned', (e, arg) => {
   return { ok: false, error: 'maksimal 2 pin — lepas salah satu pin dulu (klik kanan tab → lepas pin)' }
 })
 
+// v2.6.4 — personal flag: TIDAK sama dengan pin. Pin = akun tetap hidup di background.
+// Personal = tag inisial gak boleh kepasang di nomor ini (Adam: "khusus nomor pribadi,
+// bukan nomor yang di pin"). Instant effect: kalau engine udah kepasang di view itu
+// (misal view kebuka duluan baru di-tandai), langsung matiin via setCfg({enabled:false}).
+ipcMain.handle('wa-multi:setPersonal', async (_e, arg) => {
+  const { id, on } = typeof arg === 'string' ? { id: arg, on: true } : (arg || {})
+  const a = accounts.find(x => x.id === id)
+  if (!a) return { ok: false, error: 'akun tidak ada' }
+  a.personal = on !== false
+  saveAccounts()
+  // Kalau view-nya lagi hidup, terapkan effect seketika: pribadi -> matiin engine,
+  // bukan pribadi -> biarkan loop ensureInitialEngine pasang engine lagi (7 detik berikutnya).
+  const v = mapGet(id)
+  if (v && v.webContents && !v.webContents.isDestroyed()) {
+    try {
+      if (a.personal) {
+        await v.webContents.executeJavaScript('if(window.__WA_MULTI_INITIAL_ENGINE__){window.__WA_MULTI_INITIAL_ENGINE__.setCfg({enabled:false});true}else{false}').catch(() => false)
+      }
+    } catch (e) {}
+  }
+  notifyStateChanged()
+  return { ok: true, personal: !!a.personal }
+})
+
 ipcMain.handle('wa-multi:setTabMode', (e, mode) => {
   prefs.tabMode = mode === 'solo' ? 'solo' : 'dual'
   savePrefs()
@@ -1225,12 +1268,17 @@ ipcMain.handle('wa-multi:initialStatus', async () => {
   // from "running", which is what made the v2.6.1 bug so hard to see from his side.
   try {
     const cfg = prefs.initial || {}
-    const out = { ok: true, enabled: !!cfg.enabled, code: cfg.code || '', views: [], armed: 0, total: 0, reason: '' }
-    const views = waAllViews()
-    out.total = views.length
+    const out = { ok: true, enabled: !!cfg.enabled, code: cfg.code || '', views: [], armed: 0, total: 0, personalSkipped: 0, reason: '' }
+    const liveViews = waAllViews()
+    // v2.6.4 — akun pribadi gak dihitung di 'total' & 'armed': tag emang sengaja gak
+    // dipasang di sana, jadi laporan harus jujur (jangan tampak sebagai "error").
+    const usable = liveViews.filter(v => !isPersonalView(v))
+    out.total = usable.length
+    out.personalSkipped = liveViews.length - usable.length
     if (!cfg.enabled) out.reason = 'inisial mati'
-    else if (!views.length) out.reason = 'belum ada akun WA yang kebuka'
-    for (const v of views) {
+    else if (!liveViews.length) out.reason = 'belum ada akun WA yang kebuka'
+    else if (!usable.length) out.reason = 'semua akun ditandai pribadi — tag gak dipasang di mana pun'
+    for (const v of usable) {
       let s = null
       try {
         s = await v.webContents.executeJavaScript(`(function(){try{
@@ -1244,7 +1292,7 @@ ipcMain.handle('wa-multi:initialStatus', async () => {
       out.views.push(s)
       if (s && s.armed && s.enabled) out.armed++
     }
-    if (cfg.enabled && views.length && out.armed === 0) out.reason = 'engine belum nyala di halaman WA'
+    if (cfg.enabled && usable.length && out.armed === 0) out.reason = 'engine belum nyala di halaman WA'
     return out
   } catch (e) { return { ok: false, error: String((e && e.message) || e) } }
 })
@@ -1659,6 +1707,20 @@ function runSelfTest () {
       const repinB = await js(`window.waMulti.setPinned("${addB.id}", true)`)
       check('re-pin after unpin works', repinB.ok === true && views.has(addB.id) === true)
 
+      // 4d2. v2.6.4 — personal flag (TERPISAH dari pin; tag inisial TIDAK ke nomor pribadi)
+      await js(`window.waMulti.setPersonal("${addA.id}", true)`).catch(() => {})
+      check('personal persisted in accounts.json', JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8')).find(a => a.id === addA.id).personal === true, 'personal=not-true-after-save')
+      const withPers = await js('window.waMulti.getState()')
+      check('getState exposes personal flag', withPers.accounts.find(a => a.id === addA.id).personal === true)
+      check('isPersonalAccount resolves by id', isPersonalAccount(addA.id) === true && isPersonalAccount(addB.id) === false)
+      const vA2 = mapGet(addA.id); const vB2 = mapGet(addB.id)
+      check('isPersonalView maps live view to account', vA2 && isPersonalView(vA2) === true && vB2 && isPersonalView(vB2) === false)
+      check('waAllViews still returns personal view (skip happens at engine loop)', waAllViews().filter(isPersonalView).length === 1, 'personal views=' + waAllViews().filter(isPersonalView).length)
+      const usableNow = waAllViews().filter(v => !isPersonalView(v))
+      check('initialStatus usable = non-personal only', usableNow.length === waAllViews().length - 1, `usable=${usableNow.length}`)
+      await js(`window.waMulti.setPersonal("${addA.id}", false)`)
+      check('personal unflag persists', JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8')).find(a => a.id === addA.id).personal === false)
+
       // 4d. split layout is an OPTION (both pins alive → side-by-side)
       await js('window.waMulti.setLayoutMode("split")')
       await wait(400)
@@ -1890,11 +1952,11 @@ function runSelfTest () {
       check('lexical line break inserted', lc.indexOf('linebreak') >= 0, JSON.stringify(lc))
       check('lexical marker text inserted', lc.some(c => c === 'text:/DM'), JSON.stringify(lc))
       check('lexical path reported as method', !!(lexProbe && lexProbe.method === 'ok'), JSON.stringify(lexProbe))
-      // v2.6.3 REGRESSION — Adam's field bug: with the caret parked in the MIDDLE of a long
+      // v2.6.4 REGRESSION — Adam's field bug: with the caret parked in the MIDDLE of a long
       // message, insertLineBreak() splits the paragraph at the caret and the tag lands
       // mid-text ("...minimal 2 jam/sesi" / "DM dengan SOW 4 Sesi"). The engine must force
       // the selection to the document END before inserting.
-      check('selection forced to end before insert (v2.6.3)', lc.indexOf('selectEnd') >= 0, JSON.stringify(lc))
+      check('selection forced to end before insert (v2.6.4)', lc.indexOf('selectEnd') >= 0, JSON.stringify(lc))
 
       // engine must NOT gate itself behind WPP (the v2.6.1 "never activates" bug):
       // ensureInitialEngine must accept a WA view that has no WPP injected.
@@ -1910,7 +1972,7 @@ function runSelfTest () {
       check('updater never auto-installs on quit', !!(upObj && upObj.autoInstallOnAppQuit === false), upObj ? String(upObj.autoInstallOnAppQuit) : 'null')
       check('download only via explicit IPC', typeof updaterDownloadAndInstall === 'function' && typeof autoCheckOnLaunch === 'function')
       const av = await js('window.waMulti.appVersion()')
-      check('appVersion reports 2.6.3', !!(av && av.ok === true && av.version === '2.6.3'), JSON.stringify(av))
+      check('appVersion reports 2.6.4', !!(av && av.ok === true && av.version === '2.6.4'), JSON.stringify(av))
       // v2.6.2 — live engine status surface (settings dialog shows "aktif di N akun")
       const istat = await js('window.waMulti.initialStatus()')
       check('initialStatus reports shape', !!(istat && istat.ok === true && typeof istat.armed === 'number' && typeof istat.total === 'number' && Array.isArray(istat.views)), JSON.stringify(istat))

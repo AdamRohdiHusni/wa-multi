@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('waMulti', {
   openAccount: (id) => ipcRenderer.invoke('wa-multi:openAccount', id),
   parkAccount: (id) => ipcRenderer.invoke('wa-multi:parkAccount', id),
   setPinned: (id, on) => ipcRenderer.invoke('wa-multi:setPinned', { id, on: on !== false }),
+  setPersonal: (id, on) => ipcRenderer.invoke('wa-multi:setPersonal', { id, on: on !== false }),
   // prefs
   setTabMode: (mode) => ipcRenderer.invoke('wa-multi:setTabMode', mode),
   setLayoutMode: (mode) => ipcRenderer.invoke('wa-multi:setLayoutMode', mode),
