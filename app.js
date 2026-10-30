@@ -110,10 +110,14 @@ $('licLater')?.addEventListener('click', () => {
 
 $('licDeactivate')?.addEventListener('click', async () => {
   if (!confirm('Lepas lisensi dari laptop ini? Key bisa dipake di laptop lain.')) return
-  await window.waMulti.deactivateLicense()
+  const r = await window.waMulti.deactivateLicense()
   $('licenseDlg').close()
   window.waMulti.setOverlayOpen(false)
-  toast('lisensi dilepas dari laptop ini')
+  // v2.6.5 — kasih tau kalau ada akun WA yang ikut diparkir (limit trial = 1 akun)
+  const dropped = r && r.enforced && r.enforced.dropped
+  toast(dropped
+    ? `lisensi dilepas — ${dropped} akun WA diparkir (versi trial cuma 1 akun)`
+    : 'lisensi dilepas dari laptop ini')
   refreshState()
 })
 

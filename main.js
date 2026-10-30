@@ -88,7 +88,7 @@ const INITIAL_ENGINE =   "(function(){" +
   "function lexEditorOf(el){try{return (el&&el.__lexicalEditor)||null}catch(e){return null}}" +
   "function lexAppend(el,m){var ed=lexEditorOf(el);if(!ed||typeof ed.update!=='function')return 'no-editor';" +
   "var done=false;try{ed.update(function(){var st=ed._pendingEditorState||ed._editorState;" +
-  // v2.6.4 FIX: insert at the END of the message, NEVER at the caret. If the user's caret
+  // v2.6.5 FIX: insert at the END of the message, NEVER at the caret. If the user's caret
   // is mid-text, insertLineBreak() splits the paragraph there and the tag lands in the
   // MIDDLE of the message. Force the selection to the document end first.
   "var root=null;try{root=st&&st._nodeMap&&st._nodeMap.get('root')}catch(e){}" +
@@ -146,7 +146,7 @@ function waAllViews() {
   } catch (e) { return [] }
 }
 
-// v2.6.4 — personal-account flag. SEPARATE from pinning: pin = akun tetap hidup di
+// v2.6.5 — personal-account flag. SEPARATE from pinning: pin = akun tetap hidup di
 // background; personal = tag inisial TIDAK BOLEH dipasang di nomor ini (Adam: "bukan
 // di nomor yang di pin, tapi spesifik nomor pribadi"). Stored per-account in accounts.json.
 function viewAccountId (v) {
@@ -183,7 +183,7 @@ async function ensureInitialEngine() {
     if (!cfg.enabled) return
     for (const v of waAllViews()) {
       try {
-        // v2.6.4 — akun pribadi: JANGAN pasang engine inisial di nomor ini sama sekali.
+        // v2.6.5 — akun pribadi: JANGAN pasang engine inisial di nomor ini sama sekali.
         if (isPersonalView(v)) continue
         // NOTE (v2.6.2): JANGAN gate di window.WPP.isInjected. WPP cuma kepasang kalau
         // user pernah blast — kalau tidak, fitur inisial tidak pernah aktif sama sekali.
@@ -343,8 +343,10 @@ function createWindow () {
   win.loadFile(path.join(__dirname, 'index.html'))
   // license heartbeat (skip while self-testing — no network in hermetic runs)
   if (!process.env.WA_MULTI_SELFTEST) {
-    license.heartbeat(true).catch(() => {})   // first check at launch
-    setInterval(() => license.heartbeat().catch(() => {}), 60 * 60 * 1000)  // hourly tick, acts every 7d
+    // v2.6.5 — kalau heartbeat bilang lisensi mati/diturunkan, parkir view kelebihan.
+    const hbTick = () => license.heartbeat(true).then(() => { try { enforceLicenseViews() } catch (_) {} }).catch(() => {})
+    hbTick()   // first check at launch
+    setInterval(hbTick, 60 * 60 * 1000)  // hourly tick, acts every 7d
   }
   if (IS_DEV) win.webContents.openDevTools({ mode: 'detach' })
   attachResizeHandler()
@@ -510,12 +512,15 @@ function createView (accountId) {
   // v2.6.2 — pasang engine inisial SEGERA saat WA Web selesai load.
   // Sebelumnya cuma mengandalkan loop 7 detik + gate WPP (lihat ensureInitialEngine),
   // jadi user yang tidak pernah blast tidak pernah dapat fitur ini.
+  // v2.6.5 — akun pribadi: JANGAN pasang di jalur ini juga (did-finish-load / did-navigate).
+  // Sebelumnya cuma ensureInitialEngine yang skip pribadi, jadi tiap app restart &
+  // view WA di-reload, engine kepasang lagi di nomor pribadi → tag nyala terus.
   try {
     view.webContents.on('did-finish-load', () => {
-      try { if ((prefs.initial || {}).enabled) injectInitialEngine(view) } catch (_) {}
+      try { if ((prefs.initial || {}).enabled && !isPersonalAccount(accountId)) injectInitialEngine(view) } catch (_) {}
     })
     view.webContents.on('did-navigate', () => {
-      try { if ((prefs.initial || {}).enabled) setTimeout(() => injectInitialEngine(view), 3000) } catch (_) {}
+      try { if ((prefs.initial || {}).enabled && !isPersonalAccount(accountId)) setTimeout(() => injectInitialEngine(view), 3000) } catch (_) {}
     })
   } catch (_) {}
   return view
@@ -526,6 +531,10 @@ async function injectInitialEngine (view) {
   try {
     if (!view || !view.webContents || view.webContents.isDestroyed()) return
     if (!(prefs.initial || {}).enabled) return
+    // v2.6.5 — choke point terakhir: kalau view ini akun pribadi, JANGAN pernah pasang.
+    // Dipanggil dari did-finish-load/did-navigate juga, jadi guard di sini bikin
+    // "tandai pribadi" beneran permanen lintas restart.
+    if (isPersonalView(view)) return
     const has = await view.webContents.executeJavaScript('!!window.__WA_MULTI_INITIAL_ENGINE__').catch(() => false)
     if (!has) await view.webContents.executeJavaScript(INITIAL_ENGINE).catch(() => {})
     await view.webContents.executeJavaScript('window.__WA_MULTI_INITIAL_ENGINE__ && window.__WA_MULTI_INITIAL_ENGINE__.setCfg(' + initialCfgJSON() + ')').catch(() => {})
@@ -547,6 +556,45 @@ function destroyView (accountId) {
     }
     if (!activeAccountId && views.size) activeAccountId = [...views.keys()][0]
   }
+}
+
+// v2.6.5 — lisensi dicabut/diturunkan → jagain jumlah view hidup SESUAI limit.
+// Bug: sebelum ini maxWaAccounts() cuma di-enforce di addAccount (nambah akun baru),
+// jadi kalau user udah buka 3 WA lalu lepas lisensi, 3 view itu TETAP nyala padahal
+// trial cuma boleh 1. Fungsi ini dipanggil habis deactivate/activate/heartbeat yang
+// mengubah status lisensi, dan nge-park (destroy) view yang kelebihan, prioritas:
+// pinned (pribadi) > pin2 > transient (yang paling baru dibuka).
+function enforceLicenseViews () {
+  try {
+    const max = license.maxWaAccounts()
+    const live = [...views.keys()]
+    if (live.length <= max) return { ok: true, kept: live.length, max }
+    // urutkan: pinned dulu, terus pin2, terus transient by lastOpened desc
+    const rank = (id) => {
+      if (prefs.pinnedId === id) return 0
+      if (prefs.pin2Id === id) return 1
+      return 2
+    }
+    const ordered = live.slice().sort((a, b) => {
+      const ra = rank(a), rb = rank(b)
+      if (ra !== rb) return ra - rb
+      const la = (accounts.find(x => x.id === a) || {}).lastOpened || 0
+      const lb = (accounts.find(x => x.id === b) || {}).lastOpened || 0
+      return lb - la  // transient: paling baru dibuka duluan dipertahankan
+    })
+    const keep = ordered.slice(0, max)
+    const drop = ordered.slice(max)
+    for (const id of drop) {
+      try { destroyView(id) } catch (_) {}
+    }
+    // kalau yang aktif ke-destroy, pindahin ke view yang tersisa
+    if (activeAccountId && !views.has(activeAccountId)) {
+      activeAccountId = keep[0] || null
+      if (activeAccountId) { try { bringToFront(activeAccountId) } catch (_) {} }
+    }
+    notifyStateChanged()
+    return { ok: true, kept: keep.length, dropped: drop.length, max }
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) } }
 }
 
 // Assign an account to a stage slot and make sure a view exists for it
@@ -1194,7 +1242,7 @@ ipcMain.handle('wa-multi:setPinned', (e, arg) => {
   return { ok: false, error: 'maksimal 2 pin — lepas salah satu pin dulu (klik kanan tab → lepas pin)' }
 })
 
-// v2.6.4 — personal flag: TIDAK sama dengan pin. Pin = akun tetap hidup di background.
+// v2.6.5 — personal flag: TIDAK sama dengan pin. Pin = akun tetap hidup di background.
 // Personal = tag inisial gak boleh kepasang di nomor ini (Adam: "khusus nomor pribadi,
 // bukan nomor yang di pin"). Instant effect: kalau engine udah kepasang di view itu
 // (misal view kebuka duluan baru di-tandai), langsung matiin via setCfg({enabled:false}).
@@ -1270,7 +1318,7 @@ ipcMain.handle('wa-multi:initialStatus', async () => {
     const cfg = prefs.initial || {}
     const out = { ok: true, enabled: !!cfg.enabled, code: cfg.code || '', views: [], armed: 0, total: 0, personalSkipped: 0, reason: '' }
     const liveViews = waAllViews()
-    // v2.6.4 — akun pribadi gak dihitung di 'total' & 'armed': tag emang sengaja gak
+    // v2.6.5 — akun pribadi gak dihitung di 'total' & 'armed': tag emang sengaja gak
     // dipasang di sana, jadi laporan harus jujur (jangan tampak sebagai "error").
     const usable = liveViews.filter(v => !isPersonalView(v))
     out.total = usable.length
@@ -1314,14 +1362,21 @@ ipcMain.handle('wa-multi:updateInstall', async () => {
 
 ipcMain.handle('wa-multi:activateLicense', async (e, key) => {
   const r = await license.activate(key)
+  // v2.6.5 — lisensi naik tier bisa nambah kuota akun; gak ada yang perlu diparkir,
+  // tapi enforce tetap dipanggil biar state konsisten.
+  try { enforceLicenseViews() } catch (_) {}
   notifyStateChanged()
   // kick an immediate heartbeat-able state refresh on success
   return r
-})
+}) 
 ipcMain.handle('wa-multi:deactivateLicense', async () => {
   const r = await license.deactivate()
+  // v2.6.5 — FIX bug Adam: lepas lisensi dulu bikin 3 WA tetap nyala (limit cuma
+  // dicek di addAccount). Sekarang view yang kelebihan langsung diparkir.
+  let enforced = null
+  try { enforced = enforceLicenseViews() } catch (_) {}
   notifyStateChanged()
-  return r
+  return Object.assign({}, r, { enforced })
 })
 
 ipcMain.handle('wa-multi:setTheme', (e, theme) => {
@@ -1707,7 +1762,7 @@ function runSelfTest () {
       const repinB = await js(`window.waMulti.setPinned("${addB.id}", true)`)
       check('re-pin after unpin works', repinB.ok === true && views.has(addB.id) === true)
 
-      // 4d2. v2.6.4 — personal flag (TERPISAH dari pin; tag inisial TIDAK ke nomor pribadi)
+      // 4d2. v2.6.5 — personal flag (TERPISAH dari pin; tag inisial TIDAK ke nomor pribadi)
       await js(`window.waMulti.setPersonal("${addA.id}", true)`).catch(() => {})
       check('personal persisted in accounts.json', JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8')).find(a => a.id === addA.id).personal === true, 'personal=not-true-after-save')
       const withPers = await js('window.waMulti.getState()')
@@ -1952,11 +2007,11 @@ function runSelfTest () {
       check('lexical line break inserted', lc.indexOf('linebreak') >= 0, JSON.stringify(lc))
       check('lexical marker text inserted', lc.some(c => c === 'text:/DM'), JSON.stringify(lc))
       check('lexical path reported as method', !!(lexProbe && lexProbe.method === 'ok'), JSON.stringify(lexProbe))
-      // v2.6.4 REGRESSION — Adam's field bug: with the caret parked in the MIDDLE of a long
+      // v2.6.5 REGRESSION — Adam's field bug: with the caret parked in the MIDDLE of a long
       // message, insertLineBreak() splits the paragraph at the caret and the tag lands
       // mid-text ("...minimal 2 jam/sesi" / "DM dengan SOW 4 Sesi"). The engine must force
       // the selection to the document END before inserting.
-      check('selection forced to end before insert (v2.6.4)', lc.indexOf('selectEnd') >= 0, JSON.stringify(lc))
+      check('selection forced to end before insert (v2.6.5)', lc.indexOf('selectEnd') >= 0, JSON.stringify(lc))
 
       // engine must NOT gate itself behind WPP (the v2.6.1 "never activates" bug):
       // ensureInitialEngine must accept a WA view that has no WPP injected.
@@ -1972,7 +2027,7 @@ function runSelfTest () {
       check('updater never auto-installs on quit', !!(upObj && upObj.autoInstallOnAppQuit === false), upObj ? String(upObj.autoInstallOnAppQuit) : 'null')
       check('download only via explicit IPC', typeof updaterDownloadAndInstall === 'function' && typeof autoCheckOnLaunch === 'function')
       const av = await js('window.waMulti.appVersion()')
-      check('appVersion reports 2.6.4', !!(av && av.ok === true && av.version === '2.6.4'), JSON.stringify(av))
+      check('appVersion reports 2.6.5', !!(av && av.ok === true && av.version === '2.6.5'), JSON.stringify(av))
       // v2.6.2 — live engine status surface (settings dialog shows "aktif di N akun")
       const istat = await js('window.waMulti.initialStatus()')
       check('initialStatus reports shape', !!(istat && istat.ok === true && typeof istat.armed === 'number' && typeof istat.total === 'number' && Array.isArray(istat.views)), JSON.stringify(istat))
@@ -1990,6 +2045,63 @@ function runSelfTest () {
       await js('window.waMulti.setInitials({enabled:false})')
       const uc = await js('Promise.race([window.waMulti.updateCheck(false),new Promise(r=>setTimeout(()=>r({ok:false,error:"timeout"}),8000))])')
       check('updateCheck responds', !!(uc && typeof uc.ok === 'boolean'), JSON.stringify(uc))
+
+      // ── 20. v2.6.5 — bug fix regressions ────────────────────────────────
+      // (a) personal flag must hold across a VIEW RELOAD. Adam: tag nyala lagi tiap
+      // app restart. Root cause was injectInitialEngine() reached from
+      // did-finish-load/did-navigate without a personal check.
+      {
+        const pAcc = await js('window.waMulti.addAccount("PribadiReload")')
+        await js(`window.waMulti.setPersonal("${pAcc.id}", true)`)
+        await js(`window.waMulti.openAccount("${pAcc.id}")`)
+        await wait(700)
+        const pView = views.get(pAcc.id)
+        check('personal reload-target has a live view', !!pView)
+        // simulate the WA Web reload that happens on every app restart
+        try { await pView.webContents.reload() } catch (_) {}
+        await wait(2500)   // did-finish-load + injectInitialEngine window
+        const leaked = await pView.webContents.executeJavaScript('!!window.__WA_MULTI_INITIAL_ENGINE__').catch(() => 'err')
+        check('personal account gets NO engine after view reload', leaked === false, `engine=${String(leaked)}`)
+        check('injectInitialEngine refuses personal view', isPersonalView(pView) === true)
+        // unflag → engine allowed again on next loop
+        await js(`window.waMulti.setPersonal("${pAcc.id}", false)`)
+        check('unflag frees the account for the engine', isPersonalAccount(pAcc.id) === false)
+        await js(`window.waMulti.parkAccount("${pAcc.id}")`)
+        await wait(300)
+      }
+      // (b) dropping the licence must park everything above the trial limit (1 WA).
+      // Adam: "lisensi gua lepas masih bisa baca 3 WA yang nyala".
+      // NOTE: addB/addC were already removed by the removeAccount test above, so build
+      // a fresh, deterministic 3-live-view state here: pinned + pin2 + transient.
+      {
+        await js(`window.waMulti.setPinned("${addA.id}", true)`)   // personal pin → slot a
+        await wait(400)
+        const c1 = await js('window.waMulti.addAccount("LicTest1")')
+        const c2 = await js('window.waMulti.addAccount("LicTest2")')
+        await js(`window.waMulti.setPinned("${c1.id}", true)`)     // pin2 → slot b
+        await wait(500)
+        const open3 = await js(`window.waMulti.openAccount("${c2.id}")`)   // transient
+        await wait(700)
+        const before = views.size
+        check('three accounts live before licence drop', before === 3, `n=${before} open3=${JSON.stringify(open3)}`)
+
+        // emulate a deactivated licence: trial mode → maxWaAccounts() === 1
+        const forced = process.env.WA_MULTI_LIC_FORCE
+        process.env.WA_MULTI_LIC_FORCE = 'trial'
+        const lim = license.maxWaAccounts()
+        check('trial licence caps at 1 WA account', lim === 1, `max=${lim}`)
+        const enf = enforceLicenseViews()
+        check('enforceLicenseViews reports a drop', !!(enf && enf.ok === true && enf.dropped >= 2), JSON.stringify(enf))
+        check('only 1 view survives licence drop', views.size === 1, `n=${views.size}`)
+        check('the pinned account is the survivor', views.has(addA.id) === true, `hasA=${views.has(addA.id)}`)
+        check('activeAccountId still points at a live view', !!activeAccountId && views.has(activeAccountId), String(activeAccountId))
+        if (forced === undefined) delete process.env.WA_MULTI_LIC_FORCE
+        else process.env.WA_MULTI_LIC_FORCE = forced
+        check('enforceLicenseViews is a no-op when within limit', (() => { const r = enforceLicenseViews(); return r.ok === true && r.kept === views.size })(), `n=${views.size}`)
+        // cleanup the scratch accounts so the run ends in a tidy state
+        await js(`window.waMulti.removeAccount("${c1.id}")`)
+        await js(`window.waMulti.removeAccount("${c2.id}")`)
+      }
     } catch (e) {
       check('harness completed without exception', false, e.message)
     }
