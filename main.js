@@ -385,6 +385,8 @@ app.whenReady().then(() => {
   createWindow()
   buildTray()
   startScheduleTicker()
+  // v2.7.0 — poll status server buat badge live (kalau server dikonfigurasi)
+  try { if (serverConfig()) startServerPoll() } catch (_) {}
   if (process.env.WA_MULTI_SELFTEST) runSelfTest()
 })
 
@@ -601,6 +603,12 @@ function enforceLicenseViews () {
 function showInSlot (accountId, slot) {
   const acc = accounts.find(a => a.id === accountId)
   if (!acc) return { ok: false, error: 'akun tidak ada' }
+  // v2.7.0 — choke point: akun yang lagi di SERVER gak boleh dapet view di laptop,
+  // dari jalur mana pun (setPinned, showTransient, restore boot). Ini yang bikin
+  // sesi gak tabrakan → WA gak ke-logout dua-duanya.
+  if (isServerAccount(accountId)) {
+    return { ok: false, server: true, error: `Akun "${acc.name}" lagi di server — gak bisa dibuka di laptop. Tarik balik dulu.` }
+  }
   // free the target slot from whoever holds it
   for (const [id, s] of [...slotOf]) {
     if (s === slot && id !== accountId) {
@@ -633,6 +641,7 @@ function showInSlot (accountId, slot) {
 function showTransient (accountId) {
   const acc = accounts.find(a => a.id === accountId)
   if (!acc) return { ok: false, error: 'akun tidak ada' }
+  if (isServerAccount(accountId)) return { ok: false, server: true, error: `Akun "${acc.name}" lagi di server — tarik balik dulu.` }
   if (prefs.pinnedId === accountId) return showInSlot(accountId, 'a')
   if (prefs.pin2Id === accountId) return showInSlot(accountId, 'b')
   const worker = activeJob && activeJob.currentWorker
@@ -660,6 +669,10 @@ function showTransient (accountId) {
 }
 
 function openAccount (accountId) {
+  // v2.7.0 — guard: akun yang lagi di server gak boleh dibuka dari laptop.
+  // (Sesi sama ada di 2 tempat → WhatsApp bisa logout dua-duanya.)
+  const serverGuard = assertServerSafe(accountId, 'Tarik balik')
+  if (!serverGuard.ok) { notifyStateChanged(); return serverGuard }
   const isPinned = prefs.pinnedId === accountId
   const isPin2 = prefs.pin2Id === accountId
   if (isPinned) return showInSlot(accountId, 'a')
@@ -676,6 +689,7 @@ function openAccount (accountId) {
 function parkAccount (accountId) {
   if (prefs.pinnedId === accountId) return { ok: false, error: 'akun pribadi gak bisa diparkir — lepas pin dulu' }
   if (prefs.pin2Id === accountId) return { ok: false, error: 'akun ini ke-pin — lepas pin dulu buat parkir' }
+  if (isServerAccount(accountId)) return { ok: false, error: 'akun ini lagi di server — tarik balik dulu' }
   destroyView(accountId)
   if (!activeAccountId && views.size) activeAccountId = [...views.keys()][0]
   if (activeAccountId) bringToFront(activeAccountId)
@@ -1125,8 +1139,304 @@ function notifyStateChanged () {
   try { win.webContents.send('wa-multi:stateChanged') } catch (_) {}
 }
 
+// ── v2.7.0 REGION B — Server handoff (always-on) ─────────────────
+// Fitur "Server": sesi WA di-handoff dari laptop ke server (tar.gz via
+// HTTP POST), server pegang sesi 24/7 + blast terjadwal jalan walau laptop
+// mati. Di laptop, akun yang di-server dikunci (guard) biar gak tabrakan.
+// Semua operasi manual: Adam yang pencet Migrate/Tarik balik.
+//
+// Alur Migrate  : laptop tar partition → POST → server ekstrak → OK
+// Alur Tarik    : server tar sesi → GET → laptop ekstrak → OK
+// Gate          : cuma bisa kalau license.canUseServer() (owner)
+// Guard         : akun yg lagi di-server gak bisa di-openAccount/di-blast
+// ────────────────────────────────────────────────────────────────
+const SERVER_CFG_FILE = path.join(userDataDir, 'server-config.json')
+const SERVER_PART_DIR = path.join(app.getPath('userData'), 'Partitions')
+
+const srv = {
+  cfg: null,
+  _pendingPull: null,
+  _pullTimer: null,
+  _pollTimer: null,
+  _lastStateJson: ''
+}
+
+// Baca konfig server (URL + token) dari file. Kalau belum ada → server fitur mati.
+function serverConfig () {
+  if (srv.cfg) return srv.cfg
+  try {
+    const raw = fs.readFileSync(SERVER_CFG_FILE, 'utf8')
+    const cfg = JSON.parse(raw)
+    if (!cfg || !cfg.url) return null
+    srv.cfg = cfg
+    return cfg
+  } catch (_) { return null }
+}
+
+function isServerAccount (accountId) {
+  const cfg = serverConfig()
+  if (!cfg || !cfg.accounts || !Array.isArray(cfg.accounts)) return false
+  return cfg.accounts.includes(accountId)
+}
+
+function canUseServer () {
+  try { return !!license.canUseServer() } catch (_) { return false }
+}
+
+// Simpan flag akun mana yang lagi di-server (biar UI render badge).
+function persistServerAccounts (ids) {
+  const cfg = serverConfig() || { url: '', accounts: [] }
+  cfg.accounts = ids
+  try { fs.writeFileSync(SERVER_CFG_FILE, JSON.stringify(cfg, null, 2)) } catch (_) {}
+}
+
+async function srvGet (pathname, timeoutMs = 15000) {
+  const cfg = serverConfig()
+  if (!cfg) return { ok: false, error: 'server belum dikonfigurasi' }
+  const ctl = new AbortController()
+  const t = setTimeout(() => ctl.abort(), timeoutMs)
+  try {
+    const r = await fetch(cfg.url + pathname, { signal: ctl.signal })
+    return await r.json().catch(() => ({ ok: false, error: 'respon bukan JSON' }))
+  } catch (e) {
+    return { ok: false, error: e.name === 'AbortError' ? 'timeout ' + timeoutMs + 'ms' : e.message }
+  } finally { clearTimeout(t) }
+}
+
+async function srvPost (pathname, body, timeoutMs = 15000) {
+  const cfg = serverConfig()
+  if (!cfg) return { ok: false, error: 'server belum dikonfigurasi' }
+  const ctl = new AbortController()
+  const t = setTimeout(() => ctl.abort(), timeoutMs)
+  try {
+    const r = await fetch(cfg.url + pathname, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctl.signal
+    })
+    return await r.json().catch(() => ({ ok: false, error: 'respon bukan JSON' }))
+  } catch (e) {
+    return { ok: false, error: e.name === 'AbortError' ? 'timeout ' + timeoutMs + 'ms' : e.message }
+  } finally { clearTimeout(t) }
+}
+
+// ── Guard: cegah buka/blast akun yang lagi di-server ──────────
+function assertServerSafe (accountId, action) {
+  if (isServerAccount(accountId)) {
+    return { ok: false, error: `Akun "${accountId}" lagi di server. ${action} dulu dari panel Server.` }
+  }
+  return { ok: true }
+}
+
+// ── Migrate: laptop → server ──────────────────────────────────
+// 1. tar partition (pakai tar CLI bawaan Windows — lebih hemat daripada zip,
+//    dan tar.gz streaming = gak makan RAM)
+// 2. POST ke server /migrate (raw body = gzip tar)
+// 3. server ekstrak ke Partitions/wa-<id> + kasih tahu kalo sukses
+// 4. catat akun sebagai "di server" → UI badge + guard nyala
+async function migrateAccount (accountId) {
+  if (!canUseServer()) return { ok: false, error: 'Paket lisensi lu gak punya fitur Server.' }
+  const cfg = serverConfig()
+  if (!cfg) return { ok: false, error: 'Server belum dikonfigurasi. Buka Settings → Server.' }
+  if (isServerAccount(accountId)) return { ok: false, error: 'Akun ini udah di server.' }
+  const account = accounts.find(a => a.id === accountId)
+  if (!account) return { ok: false, error: 'Akun gak ditemukan.' }
+  const partDir = path.join(SERVER_PART_DIR, 'wa-' + accountId)
+  if (!fs.existsSync(partDir)) return { ok: false, error: 'Folder sesi laptop gak ketemu: ' + partDir }
+
+  // tutup view dulu biar file gak ke-lock
+  if (views.has(accountId)) destroyView(accountId)
+
+  // tunggu Chromium benar-benar lepas handle file (SharedStorage/Cookies sering
+  // kelamaan). Poll sampai folder bisa di-rename singkat, maks 15 detik.
+  await new Promise(resolve => {
+    let tries = 0
+    const probe = () => {
+      tries++
+      try {
+        const probePath = partDir + '.lockprobe'
+        fs.renameSync(partDir, probePath)
+        fs.renameSync(probePath, partDir)
+        return resolve(true)
+      } catch (_) {
+        if (tries > 30) return resolve(false)
+        setTimeout(probe, 500)
+      }
+    }
+    setTimeout(probe, 800)
+  })
+
+  // staging lewat robocopy di Windows: /R:0 /W:0 = jangan retry file yang
+  // ke-lock (lewatin aja), exclude cache. Di Linux pakai tar --exclude.
+  const stageDir = path.join(TMP_DIR, 'stage-' + accountId)
+  const tarPath = path.join(TMP_DIR, 'wa-' + accountId + '.tar.gz')
+  try { fs.rmSync(stageDir, { recursive: true, force: true }) } catch (_) {}
+  fs.mkdirSync(stageDir, { recursive: true })
+  const { execFileSync } = require('child_process')
+  const CACHES = ['Cache', 'Code Cache', 'GPUCache', 'DawnCache', 'DawnGraphiteCache', 'DawnWebGPUCache', 'GraphiteDawnCache', 'ShaderCache', 'GrShaderCache']
+  try {
+    if (process.platform === 'win32') {
+      const args = [partDir, path.join(stageDir, 'wa-' + accountId), '/E', '/R:0', '/W:0', '/NFL', '/NDL', '/NJH', '/NJS', '/NP']
+      for (const c of CACHES) { args.push('/XD', c) }
+      let rc = 0
+      try { execFileSync('robocopy', args, { stdio: 'pipe' }) } catch (e) { rc = e.status == null ? 1 : e.status }
+      // robocopy: 0-7 = sukses (1 = ada file ke-copy, 2 = extra, 3 = 1+2, dst)
+      if (rc > 7) throw new Error('robocopy exit ' + rc)
+    } else {
+      const args = ['-cf', tarPath, '-C', SERVER_PART_DIR]
+      for (const c of CACHES) { args.push('--exclude=' + c) }
+      args.push('wa-' + accountId)
+      execFileSync('tar', args, { stdio: 'pipe' })
+    }
+  } catch (e) {
+    try { fs.rmSync(stageDir, { recursive: true, force: true }) } catch (_) {}
+    return { ok: false, error: 'Gagal salin sesi: ' + (e.message || e) }
+  }
+  // Windows: bikin tar dari stage
+  if (process.platform === 'win32') {
+    try {
+      execFileSync('tar', ['-czf', tarPath, '-C', stageDir, 'wa-' + accountId], { stdio: 'pipe' })
+    } catch (e) {
+      try { fs.rmSync(stageDir, { recursive: true, force: true }) } catch (_) {}
+      return { ok: false, error: 'Gagal bikin arsip: ' + (e.message || e) }
+    }
+    try { fs.rmSync(stageDir, { recursive: true, force: true }) } catch (_) {}
+  }
+  if (!fs.existsSync(tarPath)) return { ok: false, error: 'Arsip gak kebentuk.' }
+  const stat = fs.statSync(tarPath)
+  if (stat.size < 100000) { fs.unlinkSync(tarPath); return { ok: false, error: 'Hasil arsip terlalu kecil (' + stat.size + ' B) — batal.' } }
+
+  const upRes = await new Promise((resolve) => {
+    const http = require('http')
+    const https = require('https')
+    const mod = cfg.url.startsWith('https') ? https : http
+    const u = new URL(cfg.url + '/migrate')
+    const headers = { 'Content-Type': 'application/gzip', 'Content-Length': stat.size, 'X-Account-Id': accountId, 'X-Filename': 'wa-' + accountId + '.tar.gz' }
+    if (cfg.token) headers['X-Auth-Token'] = cfg.token
+    const req = mod.request(u, { method: 'POST', headers }, (res) => {
+      let d = ''
+      res.on('data', c => d += c)
+      res.on('end', () => { try { resolve({ ok: true, code: res.statusCode, body: JSON.parse(d) }) } catch (_) { resolve({ ok: true, code: res.statusCode, body: d }) } })
+    })
+    req.on('error', e => resolve({ ok: false, error: e.message }))
+    req.setTimeout(120000, () => { req.destroy(); resolve({ ok: false, error: 'timeout 120s' }) })
+    fs.createReadStream(tarPath).pipe(req)
+  })
+  fs.unlinkSync(tarPath)
+  if (!upRes.ok) return { ok: false, error: 'Kirim gagal: ' + (upRes.error || '') }
+  if (upRes.code !== 200) return { ok: false, error: 'Server tolak: ' + (upRes.body && upRes.body.error || upRes.body || upRes.code) }
+  // v2.7.0 — lepas pin akun ini di laptop. Kalau nggak, boot berikutnya bakal
+  // nyoba restore pin → buka sesi yang udah di server (walau udah ke-guard, mending bersih).
+  let unpinned = false
+  if (prefs.pinnedId === accountId) { prefs.pinnedId = null; unpinned = true }
+  if (prefs.pin2Id === accountId) { prefs.pin2Id = null; unpinned = true }
+  if (unpinned) { savePrefs(); try { layoutViews() } catch (_) {} }
+  persistServerAccounts([...(serverConfig().accounts || []), accountId])
+  notifyStateChanged()
+  return { ok: true, size: stat.size, unpinned }
+}
+
+// ── Tarik balik: server → laptop ──────────────────────────────
+async function pullAccount (accountId) {
+  if (!canUseServer()) return { ok: false, error: 'Paket lisensi lu gak punya fitur Server.' }
+  if (!isServerAccount(accountId)) return { ok: false, error: 'Akun ini gak ada di server.' }
+  const cfg = serverConfig()
+  if (!cfg) return { ok: false, error: 'Server belum dikonfigurasi.' }
+  if (views.has(accountId)) destroyView(accountId)
+  const tarPath = path.join(TMP_DIR, 'wa-' + accountId + '-pull.tar.gz')
+  try { fs.unlinkSync(tarPath) } catch (_) {}
+  const downRes = await new Promise((resolve) => {
+    const http = require('http')
+    const https = require('https')
+    const mod = cfg.url.startsWith('https') ? https : http
+    const u = new URL(cfg.url + '/pull/' + accountId)
+    const headers = {}
+    if (cfg.token) headers['X-Auth-Token'] = cfg.token
+    const req = mod.get(u, { headers }, (res) => {
+      if (res.statusCode !== 200) {
+        let d = ''; res.on('data', c => d += c); res.on('end', () => resolve({ ok: false, code: res.statusCode, body: d }))
+        return
+      }
+      const out = fs.createWriteStream(tarPath)
+      res.pipe(out)
+      out.on('finish', () => resolve({ ok: true, code: 200, size: fs.statSync(tarPath).size }))
+      out.on('error', e => resolve({ ok: false, error: e.message }))
+    })
+    req.on('error', e => resolve({ ok: false, error: e.message }))
+    req.setTimeout(120000, () => { req.destroy(); resolve({ ok: false, error: 'timeout 120s' }) })
+  })
+  if (!downRes.ok) return { ok: false, error: 'Download gagal: ' + (downRes.error || downRes.body || downRes.code) }
+  if (downRes.size < 100000) { fs.unlinkSync(tarPath); return { ok: false, error: 'Arsip dari server terlalu kecil (' + downRes.size + ' B) — batal.' } }
+  const partDir = path.join(SERVER_PART_DIR, 'wa-' + accountId)
+  try { fs.rmSync(partDir, { recursive: true, force: true }) } catch (_) {}
+  fs.mkdirSync(SERVER_PART_DIR, { recursive: true })
+  // arsip dari server berisi folder "wa-<id>" di root → ekstrak ke PARENT,
+  // bukan ke partDir (kalau ke partDir hasilnya jadi partDir/wa-<id>/... = dobel)
+  try {
+    const { execFileSync } = require('child_process')
+    const stageDir = path.join(TMP_DIR, 'unstage-' + accountId)
+    try { fs.rmSync(stageDir, { recursive: true, force: true }) } catch (_) {}
+    fs.mkdirSync(stageDir, { recursive: true })
+    execFileSync('tar', ['-xzf', tarPath, '-C', stageDir], { stdio: 'pipe' })
+    const inner = path.join(stageDir, 'wa-' + accountId)
+    const src = fs.existsSync(inner) ? inner : stageDir
+    if (fs.existsSync(partDir)) fs.rmSync(partDir, { recursive: true, force: true })
+    fs.renameSync(src, partDir)
+    fs.rmSync(stageDir, { recursive: true, force: true })
+  } catch (e) {
+    return { ok: false, error: 'Gagal ekstrak sesi: ' + (e.message || e) }
+  }
+  fs.unlinkSync(tarPath)
+  persistServerAccounts((serverConfig().accounts || []).filter(id => id !== accountId))
+  notifyStateChanged()
+  return { ok: true, size: downRes.size }
+}
+
+// ── Status server (dipakai UI buat badge + panel) ─────────────
+async function serverStatus () {
+  const cfg = serverConfig()
+  if (!cfg) return { configured: false }
+  const health = await srvGet('/health', 8000).catch(() => ({ ok: false, error: 'server gak nyambung' }))
+  const authed = !!(health && health.authed)
+  return {
+    configured: true,
+    reachable: !!(health && health.ok),
+    authed,
+    account: (health && health.account) || null,
+    sentToday: (health && health.sentToday) || 0,
+    cap: (health && health.cap) || 0,
+    job: (health && health.job) || null,
+    history: (health && health.history) || [],
+    serverAccounts: cfg.accounts || []
+  }
+}
+
+// Poll status server tiap 10 detik (buat badge live di tab).
+function startServerPoll () {
+  if (srv._pollTimer) return
+  srv._pollTimer = setInterval(async () => {
+    try {
+      const st = await serverStatus()
+      const json = JSON.stringify(st)
+      if (json !== srv._lastStateJson) {
+        srv._lastStateJson = json
+        notifyStateChanged()
+      }
+    } catch (_) {}
+  }, 10000)
+}
+function stopServerPoll () { if (srv._pollTimer) { clearInterval(srv._pollTimer); srv._pollTimer = null } }
+
+// ── END REGION B ──────────────────────────────────────────────
+
 ipcMain.handle('wa-multi:getState', () => ({
-  license: license.status(),
+  license: (() => { const s = license.status(); s.canUseServer = license.canUseServer(); return s })(),
+  server: (() => {
+    // v2.7.0 — status server buat badge/panel. Sync ringan: cuma baca file + cache.
+    const cfg = serverConfig()
+    return cfg ? { configured: true, serverAccounts: cfg.accounts || [], url: cfg.url || null, live: srv._lastStateJson ? JSON.parse(srv._lastStateJson) : null } : { configured: false, serverAccounts: [] }
+  })(),
   accounts: accounts.map(a => ({
     id: a.id, name: a.name, color: a.color || null,
     lastOpened: a.lastOpened || null,
@@ -1134,6 +1444,7 @@ ipcMain.handle('wa-multi:getState', () => ({
     isPinned: prefs.pinnedId === a.id,
     slot: slotOf.get(a.id) || null,
     alive: views.has(a.id),
+    onServer: isServerAccount(a.id),
     sentToday: sentToday(a.id)
   })),
   pinnedId: prefs.pinnedId,
@@ -1192,6 +1503,29 @@ ipcMain.handle('wa-multi:removeAccount', (e, id) => {
 
 ipcMain.handle('wa-multi:openAccount', (e, id) => openAccount(id))
 ipcMain.handle('wa-multi:parkAccount', (e, id) => parkAccount(id))
+
+// ── v2.7.0 IPC — Server handoff ────────────────────────────────
+ipcMain.handle('wa-multi:serverConfig', async () => {
+  const cfg = serverConfig()
+  return cfg ? { ok: true, url: cfg.url, token: !!(cfg.token), accounts: cfg.accounts || [] } : { ok: false, configured: false }
+})
+ipcMain.handle('wa-multi:serverSetConfig', async (_e, { url, token }) => {
+  if (!canUseServer()) return { ok: false, error: 'Paket lisensi lu gak punya fitur Server.' }
+  const clean = String(url || '').trim().replace(/\/+$/, '')
+  if (!/^https?:\/\//.test(clean)) return { ok: false, error: 'URL server harus mulai http(s)://' }
+  const cfg = serverConfig() || { url: '', token: '', accounts: [] }
+  cfg.url = clean
+  if (typeof token === 'string') cfg.token = token
+  srv.cfg = cfg
+  try { fs.writeFileSync(SERVER_CFG_FILE, JSON.stringify(cfg, null, 2)) } catch (e) { return { ok: false, error: 'gagal simpan config: ' + e.message } }
+  startServerPoll()
+  notifyStateChanged()
+  return { ok: true }
+})
+ipcMain.handle('wa-multi:serverStatus', async () => await serverStatus())
+ipcMain.handle('wa-multi:serverMigrate', async (_e, accountId) => await migrateAccount(accountId))
+ipcMain.handle('wa-multi:serverPull', async (_e, accountId) => await pullAccount(accountId))
+// ── END v2.7.0 IPC ─────────────────────────────────────────────
 
 // Pin = the account stays ALIVE in the background (max 2: personal slot a +
 // second pin slot b). Pinning the account that already holds the target slot
@@ -1568,6 +1902,9 @@ ipcMain.handle('wa-multi:startBlast', async (e, cfg) => {
   if (!targets.length) return { ok: false, error: 'target kosong' }
   if (!cfg.accounts || !cfg.accounts.length) return { ok: false, error: 'pilih minimal 1 akun' }
   if (!cfg.message && !cfg.media) return { ok: false, error: 'pesan / media kosong' }
+  // v2.7.0 — guard: akun yang lagi di server gak boleh dipakai blast dari laptop.
+  const serverBlocked = (cfg.accounts || []).filter(id => isServerAccount(id))
+  if (serverBlocked.length) return { ok: false, error: `Akun ${serverBlocked.join(', ')} lagi di server — tarik balik dulu kalau mau blast dari laptop.` }
 
   const job = {
     id: 'job-' + (++jobSeq) + '-' + Date.now().toString(36),
@@ -2027,7 +2364,8 @@ function runSelfTest () {
       check('updater never auto-installs on quit', !!(upObj && upObj.autoInstallOnAppQuit === false), upObj ? String(upObj.autoInstallOnAppQuit) : 'null')
       check('download only via explicit IPC', typeof updaterDownloadAndInstall === 'function' && typeof autoCheckOnLaunch === 'function')
       const av = await js('window.waMulti.appVersion()')
-      check('appVersion reports 2.6.5', !!(av && av.ok === true && av.version === '2.6.5'), JSON.stringify(av))
+      // v2.7.0 — jangan hardcode versi; test harus lolos di versi apa pun
+      check('appVersion reports the current version', !!(av && av.ok === true && av.version === app.getVersion()), JSON.stringify(av))
       // v2.6.2 — live engine status surface (settings dialog shows "aktif di N akun")
       const istat = await js('window.waMulti.initialStatus()')
       check('initialStatus reports shape', !!(istat && istat.ok === true && typeof istat.armed === 'number' && typeof istat.total === 'number' && Array.isArray(istat.views)), JSON.stringify(istat))
@@ -2126,6 +2464,28 @@ function runSelfTest () {
       await win.webContents.executeJavaScript('switchView("schedule")')
       await wait(400)
       await cap('light-schedule')
+      // v2.7.0 — server panel (set config dulu biar panel keisi)
+      await win.webContents.executeJavaScript('window.waMulti.serverSetConfig({url:"http://127.0.0.1:8790"})')
+      await wait(700)
+      await win.webContents.executeJavaScript('switchView("server")')
+      await wait(1200)
+      await cap('light-server')
+      // v2.7.0 — bukti tekstual isi panel (bukan nebak dari gambar)
+      const srvDom = await win.webContents.executeJavaScript(`(() => {
+        const p = document.getElementById('view-server')
+        const g = (id) => { const e = document.getElementById(id); return e ? e.innerText.trim().replace(/\\s+/g,' ').slice(0,300) : null }
+        return {
+          heading: (p.querySelector('h2')||{}).innerText,
+          cards: [...p.querySelectorAll('.card-title')].map(e=>e.innerText.trim()),
+          cfgInfo: g('serverCfgInfo'),
+          status: g('serverStatusBox'),
+          accounts: g('serverAccList'),
+          hist: g('serverHist'),
+          migrateBtns: [...p.querySelectorAll('.srv-migrate')].length,
+          pullBtns: [...p.querySelectorAll('.srv-pull')].length
+        }
+      })()`)
+      console.log('SERVER_PANEL_DOM ' + JSON.stringify(srvDom))
       await win.webContents.executeJavaScript('switchView("chat"); document.documentElement.setAttribute("data-theme","dark"); window.waMulti.setTheme("dark")')
       await wait(400)
       await cap('dark-chat')

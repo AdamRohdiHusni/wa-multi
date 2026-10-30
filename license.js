@@ -135,6 +135,16 @@ function createLicense (userDataDir) {
     const s = status()
     return s.mode === 'pro' && !(s.features && s.features.noSchedule)
   }
+  // v2.7.0 — fitur "Server" (handoff sesi ke server + always-on blast).
+  // Owner = bisa; trial/basic = gak (by default). Paket bisa di-disable via
+  // features.server === false. Ini cuma gerbang app-side; server tetap verifikasi
+  // sendiri via token lisensi (double gate).
+  function canUseServer () {
+    const s = status()
+    if (s.mode !== 'pro') return false
+    if (s.features && s.features.server === false) return false
+    return true
+  }
   function maxWaAccounts () {
     const s = status()
     if (s.mode !== 'pro') return 1
@@ -221,7 +231,7 @@ function createLicense (userDataDir) {
 
   function reset () { st = {}; writeState(st); return status() }   // self-test helper
 
-  return { status, activate, heartbeat, deactivate, canBlast, canSchedule, maxWaAccounts, canAddAccount, machineId, reset, _st: () => st, _file: FILE }
+  return { status, activate, heartbeat, deactivate, canBlast, canSchedule, canUseServer, maxWaAccounts, canAddAccount, machineId, reset, _st: () => st, _file: FILE }
 }
 
 module.exports = { createLicense, machineId }

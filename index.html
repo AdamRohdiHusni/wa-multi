@@ -29,6 +29,11 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 7v5.5l3.5 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
         Jadwal
       </button>
+      <!-- v2.7.0 — Server: handoff sesi ke server buat always-on blast -->
+      <button class="nav-btn" data-view="server" id="navServer" title="Server — sesi jalan 24/7 di server, laptop boleh mati">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="7" rx="2" stroke="currentColor" stroke-width="2"/><rect x="3" y="13" width="18" height="7" rx="2" stroke="currentColor" stroke-width="2"/><path d="M7 7.5h.01M7 16.5h.01" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+        Server
+      </button>
     </nav>
 
     <div class="spacer"></div>
@@ -192,6 +197,47 @@
           Kalau laptop mati / app gak jalan pas waktunya, jadwal itu <b>di-skip</b> (gak nyusul).
         </div>
         <div id="schedList" class="sched-list"></div>
+      </div>
+    </section>
+
+    <!-- ── v2.7.0 Server view: handoff sesi + always-on blast ─── -->
+    <section id="view-server" class="panel">
+      <div class="panel-scroll">
+        <div class="panel-head">
+          <h2>Server</h2>
+          <p class="sub">Pindahin sesi WA ke server biar blast tetap jalan walau laptop mati.</p>
+        </div>
+
+        <div class="warn-box">
+          Sesi cuma boleh hidup di <b>satu tempat</b>. Setelah dikirim ke server, tab akun itu
+          dikunci di laptop (biar WA gak ke-logout dua-duanya). Tarik balik kalau mau dipakai di sini lagi.
+        </div>
+
+        <div class="card" id="serverCfgCard">
+          <div class="card-title">Alamat server</div>
+          <div id="serverCfgView">
+            <p class="sub small" id="serverCfgInfo">Belum dikonfigurasi.</p>
+            <div class="row">
+              <input type="text" id="serverUrl" placeholder="http://100.97.88.34:8790" style="flex:1" />
+              <button type="button" class="ghost-btn" id="serverSaveCfg">Simpan</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Status server</div>
+          <div id="serverStatusBox" class="sub small">Cek status...</div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Akun di laptop</div>
+          <div id="serverAccList" class="acc-list"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Aktivitas blast di server</div>
+          <div id="serverHist" class="sub small">—</div>
+        </div>
       </div>
     </section>
   </main>

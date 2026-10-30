@@ -46,6 +46,12 @@ contextBridge.exposeInMainWorld('waMulti', {
   updateCheck: (manual) => ipcRenderer.invoke('wa-multi:updateCheck', manual),
   updateInstall: () => ipcRenderer.invoke('wa-multi:updateInstall'),
   appVersion: () => ipcRenderer.invoke('wa-multi:appVersion'),
+  // v2.7.0 — server handoff (always-on)
+  serverConfig: () => ipcRenderer.invoke('wa-multi:serverConfig'),
+  serverSetConfig: (cfg) => ipcRenderer.invoke('wa-multi:serverSetConfig', cfg),
+  serverStatus: () => ipcRenderer.invoke('wa-multi:serverStatus'),
+  serverMigrate: (id) => ipcRenderer.invoke('wa-multi:serverMigrate', id),
+  serverPull: (id) => ipcRenderer.invoke('wa-multi:serverPull', id),
   // events
   onStateChanged: (cb) => ipcRenderer.on('wa-multi:stateChanged', () => cb()),
   onUnread: (cb) => ipcRenderer.on('wa-multi:unread', (_e, payload) => cb(payload)),

@@ -441,3 +441,30 @@ dialog .hint.small { font-size: 11.5px; margin-bottom: 6px; }
 .members-list .mm:last-child { border-bottom: 0; }
 .members-list .mm .num { color: var(--sub); font-family: monospace; }
 .members-list .mm .adm { color: var(--grn); font-size: 11px; margin-left: 6px; }
+
+/* ── v2.7.0 Server badge + panel ─────────────────────────────── */
+.tab .srv-badge {
+  font-size: 10px;
+  font-weight: 700;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--grn, #25d366);
+  border: 1px solid color-mix(in srgb, var(--grn, #25d366) 45%, transparent);
+  border-radius: 10px;
+  padding: 1px 6px;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+.tab.srv { opacity: .75; }
+.tab.srv .tname { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--fg2) 55%, transparent); }
+
+.acc-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--line);
+}
+.acc-row:last-child { border-bottom: 0; }
+.acc-row .mn { flex: 1; }
+.acc-row .btn-row { display: flex; gap: 6px; }
+.warn { color: #e2b93b; }
