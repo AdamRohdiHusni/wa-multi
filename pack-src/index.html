@@ -12,7 +12,7 @@
     <div class="brand">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5.1-1.3A10 10 0 1 0 12 2Zm5.2 14.2c-.2.6-1.2 1.2-1.7 1.2-.4.1-1 .1-1.6-.1-2.6-.8-4.3-2.6-5.6-4.8-.5-.9-.9-2-.7-2.9.1-.6.6-1.5 1.2-1.7.3-.1.8-.1 1 .1.2.2.9 1.6.9 1.8.1.2 0 .4-.1.6l-.5.7c-.2.2-.2.4-.1.6.5.9 1.5 1.9 2.5 2.4.2.1.4.1.6-.1l.7-.7c.2-.2.4-.2.6-.1.2.1 1.6.8 1.8.9.2.3.2.7 0 1.1Z" fill="currentColor"/></svg>
       <span>WA Multi</span>
-      <span class="ver">v2.5</span>
+      <span class="ver" id="brandVer">v…</span>
       <span class="ver" id="licenseBadge" title="status lisensi">…</span>
     </div>
 
@@ -28,6 +28,11 @@
       <button class="nav-btn" data-view="schedule">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 7v5.5l3.5 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
         Jadwal
+      </button>
+      <!-- v2.7.0 — Server: handoff sesi ke server buat always-on blast -->
+      <button class="nav-btn" data-view="server" id="navServer" title="Server — sesi jalan 24/7 di server, laptop boleh mati">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="7" rx="2" stroke="currentColor" stroke-width="2"/><rect x="3" y="13" width="18" height="7" rx="2" stroke="currentColor" stroke-width="2"/><path d="M7 7.5h.01M7 16.5h.01" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+        Server
       </button>
     </nav>
 
@@ -194,6 +199,47 @@
         <div id="schedList" class="sched-list"></div>
       </div>
     </section>
+
+    <!-- ── v2.7.0 Server view: handoff sesi + always-on blast ─── -->
+    <section id="view-server" class="panel">
+      <div class="panel-scroll">
+        <div class="panel-head">
+          <h2>Server</h2>
+          <p class="sub">Pindahin sesi WA ke server biar blast tetap jalan walau laptop mati.</p>
+        </div>
+
+        <div class="warn-box">
+          Sesi cuma boleh hidup di <b>satu tempat</b>. Setelah dikirim ke server, tab akun itu
+          dikunci di laptop (biar WA gak ke-logout dua-duanya). Tarik balik kalau mau dipakai di sini lagi.
+        </div>
+
+        <div class="card" id="serverCfgCard">
+          <div class="card-title">Alamat server</div>
+          <div id="serverCfgView">
+            <p class="sub small" id="serverCfgInfo">Belum dikonfigurasi.</p>
+            <div class="row">
+              <input type="text" id="serverUrl" placeholder="http://100.97.88.34:8790" style="flex:1" />
+              <button type="button" class="ghost-btn" id="serverSaveCfg">Simpan</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Status server</div>
+          <div id="serverStatusBox" class="sub small">Cek status...</div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Akun di laptop</div>
+          <div id="serverAccList" class="acc-list"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Aktivitas blast di server</div>
+          <div id="serverHist" class="sub small">—</div>
+        </div>
+      </div>
+    </section>
   </main>
 
   <!-- ── Dialogs ───────────────────────────────────────────── -->
@@ -303,6 +349,8 @@
           <span>Jangan pasang inisial di chat grup (cuma chat pribadi)</span>
         </label>
         <p class="hint small" id="initPreview">Contoh pesan: <i>Halo kak, promo hari ini ya</i></p>
+        <!-- v2.6.4 — akun pribadi gak kena tag -->
+        <p class="hint small">💡 Akun yang lu tandai <b>pribadi</b> (klik kanan tab → 🏠 Tandai pribadi) gak bakal kena tag inisial — beda sama pin.</p>
         <!-- v2.6.2 — status engine live. Adam: harus keliatan aktif/enggaknya di akun nyata. -->
         <div class="init-status" id="initStatus">Status: cek…</div>
       </div>

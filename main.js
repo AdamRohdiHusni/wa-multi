@@ -370,6 +370,18 @@ function createWindow () {
 app.isQuitting = false
 app.on('before-quit', () => { app.isQuitting = true })
 
+// v2.7.1 — jaring pengaman terakhir: error async jangan sampai nampilin dialog
+// "Uncaught Error" lalu matiin app. Kasus nyata: fs.statSync kena EPERM dari
+// Windows Defender di event handler stream → app crash pas Adam narik sesi.
+process.on('uncaughtException', (e) => {
+  try { console.error('[uncaught]', e && e.stack ? e.stack : e) } catch (_) {}
+  try { if (typeof log === 'function') log('UNCAUGHT ' + (e && e.message ? e.message : e)) } catch (_) {}
+})
+process.on('unhandledRejection', (e) => {
+  try { console.error('[unhandledRejection]', e && e.stack ? e.stack : e) } catch (_) {}
+  try { if (typeof log === 'function') log('UNHANDLED ' + (e && e.message ? e.message : e)) } catch (_) {}
+})
+
 app.whenReady().then(() => {
   // ── v2.6.2 boot ──
   // Fix notif Windows yang tampil sebagai "electron waweb.js": set AppUserModelID +
@@ -1161,11 +1173,15 @@ const srv = {
   _lastStateJson: ''
 }
 
-// Baca konfig server (URL + token) dari file. Kalau belum ada → server fitur mati.
+// Baca konfig server (URL + token) dari file. Reload tiap dipanggil —
+// JANGAN cache hasil `null`, biar config yang ditulis setelah app start
+// tetap kebaca (bug nyata: config ditulis 1 menit setelah app boot).
 function serverConfig () {
-  if (srv.cfg) return srv.cfg
   try {
-    const raw = fs.readFileSync(SERVER_CFG_FILE, 'utf8')
+    let raw = fs.readFileSync(SERVER_CFG_FILE, 'utf8')
+    // tahan BOM: PowerShell 5.1 `Set-Content -Encoding UTF8` nulis EF BB BF,
+    // dan JSON.parse nolak BOM → config kelihatan kosong (bug nyata 31 Okt).
+    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1)
     const cfg = JSON.parse(raw)
     if (!cfg || !cfg.url) return null
     srv.cfg = cfg
@@ -1305,7 +1321,7 @@ async function migrateAccount (accountId) {
   }
   if (!fs.existsSync(tarPath)) return { ok: false, error: 'Arsip gak kebentuk.' }
   const stat = fs.statSync(tarPath)
-  if (stat.size < 100000) { fs.unlinkSync(tarPath); return { ok: false, error: 'Hasil arsip terlalu kecil (' + stat.size + ' B) — batal.' } }
+  if (stat.size < 100000) { safeUnlink(tarPath); return { ok: false, error: 'Hasil arsip terlalu kecil (' + stat.size + ' B) — batal.' } }
 
   const upRes = await new Promise((resolve) => {
     const http = require('http')
@@ -1323,7 +1339,7 @@ async function migrateAccount (accountId) {
     req.setTimeout(120000, () => { req.destroy(); resolve({ ok: false, error: 'timeout 120s' }) })
     fs.createReadStream(tarPath).pipe(req)
   })
-  fs.unlinkSync(tarPath)
+  safeUnlink(tarPath)
   if (!upRes.ok) return { ok: false, error: 'Kirim gagal: ' + (upRes.error || '') }
   if (upRes.code !== 200) return { ok: false, error: 'Server tolak: ' + (upRes.body && upRes.body.error || upRes.body || upRes.code) }
   // v2.7.0 — lepas pin akun ini di laptop. Kalau nggak, boot berikutnya bakal
@@ -1338,6 +1354,21 @@ async function migrateAccount (accountId) {
 }
 
 // ── Tarik balik: server → laptop ──────────────────────────────
+// Hapus file dengan aman — Windows Defender sering nge-lock file yang baru
+// ditulis (.tar.gz), jadi unlinkSync bisa EPERM/EBUSY. Retry + jangan pernah
+// biarkan error-nya naik ke atas (dulu bikin uncaught → app crash).
+function safeUnlink (p) {
+  for (let i = 0; i < 5; i++) {
+    try { fs.unlinkSync(p); return true } catch (e) {
+      if (e.code === 'ENOENT') return true
+      try { require('child_process').execFileSync('cmd', ['/c', 'del', '/f', '/q', p], { stdio: 'pipe' }) ; return true } catch (_) {}
+      try { require('child_process').execFileSync('sleep', ['0.4'], { stdio: 'pipe' }) } catch (_) {}
+      const t = Date.now(); while (Date.now() - t < 350) {}
+    }
+  }
+  return false
+}
+
 async function pullAccount (accountId) {
   if (!canUseServer()) return { ok: false, error: 'Paket lisensi lu gak punya fitur Server.' }
   if (!isServerAccount(accountId)) return { ok: false, error: 'Akun ini gak ada di server.' }
@@ -1345,7 +1376,7 @@ async function pullAccount (accountId) {
   if (!cfg) return { ok: false, error: 'Server belum dikonfigurasi.' }
   if (views.has(accountId)) destroyView(accountId)
   const tarPath = path.join(TMP_DIR, 'wa-' + accountId + '-pull.tar.gz')
-  try { fs.unlinkSync(tarPath) } catch (_) {}
+  safeUnlink(tarPath)
   const downRes = await new Promise((resolve) => {
     const http = require('http')
     const https = require('https')
@@ -1359,15 +1390,20 @@ async function pullAccount (accountId) {
         return
       }
       const out = fs.createWriteStream(tarPath)
+      let settled = false
+      const done = (v) => { if (!settled) { settled = true; resolve(v) } }
+      res.on('error', e => done({ ok: false, error: 'stream baca: ' + e.message }))
+      out.on('error', e => done({ ok: false, error: 'tulis file: ' + e.message }))
+      // JANGAN statSync di sini — file .tar.gz yang baru ditulis bisa dikunci
+      // Defender (EPERM), dan error di event handler = uncaught → app crash.
+      out.on('finish', () => done({ ok: true, code: 200, size: out.bytesWritten || 0 }))
       res.pipe(out)
-      out.on('finish', () => resolve({ ok: true, code: 200, size: fs.statSync(tarPath).size }))
-      out.on('error', e => resolve({ ok: false, error: e.message }))
     })
     req.on('error', e => resolve({ ok: false, error: e.message }))
     req.setTimeout(120000, () => { req.destroy(); resolve({ ok: false, error: 'timeout 120s' }) })
   })
-  if (!downRes.ok) return { ok: false, error: 'Download gagal: ' + (downRes.error || downRes.body || downRes.code) }
-  if (downRes.size < 100000) { fs.unlinkSync(tarPath); return { ok: false, error: 'Arsip dari server terlalu kecil (' + downRes.size + ' B) — batal.' } }
+  if (!downRes.ok) { safeUnlink(tarPath); return { ok: false, error: 'Download gagal: ' + (downRes.error || downRes.body || downRes.code) } }
+  if (downRes.size < 100000) { safeUnlink(tarPath); return { ok: false, error: 'Arsip dari server terlalu kecil (' + downRes.size + ' B) — batal.' } }
   const partDir = path.join(SERVER_PART_DIR, 'wa-' + accountId)
   try { fs.rmSync(partDir, { recursive: true, force: true }) } catch (_) {}
   fs.mkdirSync(SERVER_PART_DIR, { recursive: true })
@@ -1385,9 +1421,10 @@ async function pullAccount (accountId) {
     fs.renameSync(src, partDir)
     fs.rmSync(stageDir, { recursive: true, force: true })
   } catch (e) {
+    safeUnlink(tarPath)
     return { ok: false, error: 'Gagal ekstrak sesi: ' + (e.message || e) }
   }
-  fs.unlinkSync(tarPath)
+  safeUnlink(tarPath)
   persistServerAccounts((serverConfig().accounts || []).filter(id => id !== accountId))
   notifyStateChanged()
   return { ok: true, size: downRes.size }
@@ -1737,6 +1774,8 @@ ipcMain.handle('wa-multi:setLayoutMode', (e, mode) => {
 })
 
 ipcMain.handle('wa-multi:activateAccount', (e, id) => {
+  // v2.7.0 — akun yang di-server gak boleh diaktifin di laptop
+  if (isServerAccount(id)) return { ok: false, server: true, error: 'akun ini lagi di server' }
   if (!views.has(id)) return { ok: false, error: 'tab belum nyala' }
   activeAccountId = id
   bringToFront(id)
@@ -2230,6 +2269,20 @@ function runSelfTest () {
 
       // 15. engine bundle vendored + injectable API names present
       check('wa-js bundle vendored', WAJS_BUNDLE.length > 100000, `bytes=${WAJS_BUNDLE.length}`)
+      // v2.7.3 — REGRESI PENTING: bundle wa-js ketinggalan = blast mati total.
+      // WhatsApp mindahin `prepRawMedia` (changelog wa-js 4.7.1, #3732) → bundle 4.6.0
+      // ngelempar "Cannot read properties of undefined (reading 'prepRawMedia')" di
+      // SETIAP blast. Adam kena 2 laptop sekaligus. Assert versi bundle >= 4.7.1.
+      {
+        const m = WAJS_BUNDLE.match(/wa-js v([0-9]+)\.([0-9]+)\.([0-9]+)/)
+        const ver = m ? `${m[1]}.${m[2]}.${m[3]}` : 'unknown'
+        const maj = m ? parseInt(m[1], 10) : 0
+        const min = m ? parseInt(m[2], 10) : 0
+        const pat = m ? parseInt(m[3], 10) : 0
+        const okVer = maj > 4 || (maj === 4 && (min > 7 || (min === 7 && pat >= 1)))
+        check('wa-js bundle >= 4.7.1 (prepRawMedia moved)', okVer, `bundle=${ver}`)
+        check('wa-js bundle splits MediaPrep bindings', /prepRawMedia/.test(WAJS_BUNDLE), `hits=${(WAJS_BUNDLE.match(/prepRawMedia/g) || []).length}`)
+      }
       check('engine exposes sendTextMessage', /sendTextMessage/.test(WAJS_BUNDLE))
       check('engine exposes getAllGroups', /getAllGroups/.test(WAJS_BUNDLE))
       check('engine exposes getGroupInfoFromInviteCode', /getGroupInfoFromInviteCode/.test(WAJS_BUNDLE))
@@ -2439,6 +2492,41 @@ function runSelfTest () {
         // cleanup the scratch accounts so the run ends in a tidy state
         await js(`window.waMulti.removeAccount("${c1.id}")`)
         await js(`window.waMulti.removeAccount("${c2.id}")`)
+      }
+      // (c) v2.7.0 — SERVER guard: akun yang lagi di server gak boleh dapet view di laptop,
+      // dari jalur mana pun. Ini yang mencegah sesi tabrakan → WA logout dua-duanya.
+      {
+        const scp = path.join(userDataDir, 'server-config.json')
+        const c3 = await js('window.waMulti.addAccount("SrvGuard")')
+        await wait(300)
+        const scfg = { url: 'http://127.0.0.1:1', token: '', accounts: [c3.id] }
+        fs.writeFileSync(scp, JSON.stringify(scfg))
+        srv.cfg = null   // buang cache config biar kepakai yang baru
+        check('isServerAccount recognises the flagged account', isServerAccount(c3.id) === true)
+        // openAccount harus ditolak
+        const oa = await js(`window.waMulti.openAccount("${c3.id}")`)
+        check('openAccount refuses a server account', !!(oa && oa.ok === false), JSON.stringify(oa))
+        // setPinned juga (jalur showInSlot langsung)
+        const sp = await js(`window.waMulti.setPinned("${c3.id}", true)`)
+        await wait(400)
+        check('setPinned cannot give a server account a view', views.has(c3.id) === false)
+        check('no slot assigned to the server account', slotOf.get(c3.id) === undefined, String(slotOf.get(c3.id)))
+        // blast juga harus nolak
+        const bl = await js(`window.waMulti.startBlast({ kind:"personal", targets:[{phone:"628123456789"}], accounts:["${c3.id}"], message:"x" })`)
+        check('startBlast refuses a server account', !!(bl && bl.ok === false), JSON.stringify(bl))
+        // getState melaporkan onServer
+        const st3 = await js('window.waMulti.getState()')
+        const acc3 = (st3.accounts || []).find(a => a.id === c3.id)
+        check('getState exposes onServer=true', !!(acc3 && acc3.onServer === true), JSON.stringify(acc3 && { onServer: acc3.onServer }))
+        // tarik balik → flag hilang
+        fs.writeFileSync(scp, JSON.stringify({ url: 'http://127.0.0.1:1', token: '', accounts: [] }))
+        srv.cfg = null
+        const st4 = await js('window.waMulti.getState()')
+        const acc4 = (st4.accounts || []).find(a => a.id === c3.id)
+        check('clearing the flag restores onServer=false', !!(acc4 && acc4.onServer === false))
+        await js(`window.waMulti.removeAccount("${c3.id}")`)
+        try { fs.unlinkSync(scp) } catch (_) {}
+        srv.cfg = null
       }
     } catch (e) {
       check('harness completed without exception', false, e.message)

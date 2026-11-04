@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('waMulti', {
   openAccount: (id) => ipcRenderer.invoke('wa-multi:openAccount', id),
   parkAccount: (id) => ipcRenderer.invoke('wa-multi:parkAccount', id),
   setPinned: (id, on) => ipcRenderer.invoke('wa-multi:setPinned', { id, on: on !== false }),
+  setPersonal: (id, on) => ipcRenderer.invoke('wa-multi:setPersonal', { id, on: on !== false }),
   // prefs
   setTabMode: (mode) => ipcRenderer.invoke('wa-multi:setTabMode', mode),
   setLayoutMode: (mode) => ipcRenderer.invoke('wa-multi:setLayoutMode', mode),
@@ -45,6 +46,12 @@ contextBridge.exposeInMainWorld('waMulti', {
   updateCheck: (manual) => ipcRenderer.invoke('wa-multi:updateCheck', manual),
   updateInstall: () => ipcRenderer.invoke('wa-multi:updateInstall'),
   appVersion: () => ipcRenderer.invoke('wa-multi:appVersion'),
+  // v2.7.0 — server handoff (always-on)
+  serverConfig: () => ipcRenderer.invoke('wa-multi:serverConfig'),
+  serverSetConfig: (cfg) => ipcRenderer.invoke('wa-multi:serverSetConfig', cfg),
+  serverStatus: () => ipcRenderer.invoke('wa-multi:serverStatus'),
+  serverMigrate: (id) => ipcRenderer.invoke('wa-multi:serverMigrate', id),
+  serverPull: (id) => ipcRenderer.invoke('wa-multi:serverPull', id),
   // events
   onStateChanged: (cb) => ipcRenderer.on('wa-multi:stateChanged', () => cb()),
   onUnread: (cb) => ipcRenderer.on('wa-multi:unread', (_e, payload) => cb(payload)),

@@ -110,10 +110,14 @@ $('licLater')?.addEventListener('click', () => {
 
 $('licDeactivate')?.addEventListener('click', async () => {
   if (!confirm('Lepas lisensi dari laptop ini? Key bisa dipake di laptop lain.')) return
-  await window.waMulti.deactivateLicense()
+  const r = await window.waMulti.deactivateLicense()
   $('licenseDlg').close()
   window.waMulti.setOverlayOpen(false)
-  toast('lisensi dilepas dari laptop ini')
+  // v2.6.5 — kasih tau kalau ada akun WA yang ikut diparkir (limit trial = 1 akun)
+  const dropped = r && r.enforced && r.enforced.dropped
+  toast(dropped
+    ? `lisensi dilepas — ${dropped} akun WA diparkir (versi trial cuma 1 akun)`
+    : 'lisensi dilepas dari laptop ini')
   refreshState()
 })
 
@@ -143,6 +147,8 @@ async function refreshState () {
   renderTargetSummary()
   syncStage()
   renderSettings()          // v2.6.0 — reflect initials + version in the settings dialog
+  const bv = $('brandVer'); if (bv) bv.textContent = 'v' + (state.appVersion || '?')
+  renderServer()            // v2.7.0 — server panel + badge state
 }
 
 function renderTabMode () {
@@ -165,20 +171,25 @@ function renderTabs () {
   wrap.innerHTML = ''
   for (const a of state.accounts) {
     const isActive = state.activeAccountId === a.id && a.slot
+    const isServer = !!a.onServer
     const t = document.createElement('div')
-    t.className = 'tab' + (a.slot ? ' on' : '') + (isActive ? ' active' : '')
+    t.className = 'tab' + (a.slot ? ' on' : '') + (isActive ? ' active' : '') + (isServer ? ' srv' : '')
     const unread = unreadMap.get(a.id) || 0
     t.innerHTML = `
       <span class="tdot" style="background:${a.color || 'var(--accent)'}"></span>
       ${a.isPinned ? '<span class="pin" title="Akun pribadi">📌</span>' : ''}
       <span class="tname">${esc(a.name)}</span>
+      ${isServer ? '<span class="srv-badge" title="Sesi ini lagi di server — dikunci di laptop">🌐 Server</span>' : ''}
       ${unread ? `<span class="tbadge">${unread}</span>` : ''}`
-    t.title = a.slot
-      ? (isActive ? `${a.name} — lagi dibuka` : `${a.name} — hidup di background (klik = langsung pindah, tanpa loading)`)
-      : `${a.name} — parkir (klik buat nyalain)`
+    t.title = isServer
+      ? `${a.name} — lagi di server (dikunci). Buka panel Server buat tarik balik.`
+      : (a.slot
+        ? (isActive ? `${a.name} — lagi dibuka` : `${a.name} — hidup di background (klik = langsung pindah, tanpa loading)`)
+        : `${a.name} — parkir (klik buat nyalain)`)
     t.addEventListener('click', async () => {
       closeCtxMenu()
       switchView('chat')
+      if (isServer) { toast(`🌐 ${a.name} lagi di server — buka panel Server buat tarik balik`); return }
       if (a.slot && state.activeAccountId !== a.id) {
         await window.waMulti.activateAccount(a.id)   // instant switch, no reload
       } else if (!a.slot) {
@@ -211,15 +222,41 @@ function openCtxMenu (x, y, account) {
     : account.isPin2
       ? '📌 Lepas pin (ke-2)'
       : (canPinMore ? '📌 Pin ke-' + (pinsUsed + 1) + ' — tetap hidup di background' : '📌 Pin (penuh — lepas pin lain dulu)')
+  const personalLabel = account.personal
+    ? '🏠 Lepas pribadi — tag inisial aktif lagi'
+    : '🏠 Tandai pribadi — tanpa tag inisial'
+  // v2.7.0 — handoff sesi ke server bisa langsung dari klik-kanan tab akun
+  const srvOn = !!account.onServer
+  const srvLabel = srvOn
+    ? '⬇️ Tarik balik dari server'
+    : '🌐 Kirim ke server (always-on)'
   m.innerHTML = `
+    <div class="acc-item" data-act="srv">${srvLabel}</div>
     <div class="acc-item${!account.isPinned && !account.isPin2 && !canPinMore ? ' disabled' : ''}" data-act="pin">${pinLabel}</div>
     ${account.slot && !account.isPinned && !account.isPin2 ? '<div class="acc-item" data-act="park">💤 Parkir tab ini</div>' : ''}
+    <div class="acc-item" data-act="personal">${personalLabel}</div>
     <div class="acc-item" data-act="ren">✎ Ganti nama</div>
     <div class="acc-item" data-act="del">🗑 Hapus akun</div>`
   m.addEventListener('click', async (e) => {
     const act = e.target.closest('[data-act]')?.dataset.act
     if (!act) return
     closeCtxMenu()
+    if (act === 'srv') {
+      if (srvOn) {
+        toast('Narik sesi dari server...')
+        const r = await window.waMulti.serverPull(account.id)
+        if (r && r.ok) toast(`✅ ${account.name} balik ke laptop`)
+        else toast('❌ Gagal tarik: ' + ((r && r.error) || '?'))
+      } else {
+        if (!confirm(`Kirim sesi "${account.name}" ke server?\n\nSesinya bakal jalan 24/7 di server (laptop boleh mati).`)) return
+        toast('Ngirim sesi ke server... jangan tutup app.')
+        const r = await window.waMulti.serverMigrate(account.id)
+        if (r && r.ok) toast(`✅ ${account.name} jalan di server (${(r.size / 1048576).toFixed(1)} MB)`)
+        else toast('❌ Gagal kirim: ' + ((r && r.error) || '?'))
+      }
+      refreshState()
+      return
+    }
     if (act === 'pin') {
       if (!account.isPinned && !account.isPin2 && state.accounts.filter(x => x.isPinned || x.isPin2).length >= 2) {
         toast('maksimal 2 pin — lepas salah satu dulu')
@@ -229,6 +266,7 @@ function openCtxMenu (x, y, account) {
       refreshState()
     }
     if (act === 'park') { await window.waMulti.parkAccount(account.id); refreshState() }
+    if (act === 'personal') { await window.waMulti.setPersonal(account.id, !account.personal); refreshState() }
     if (act === 'ren') openRenameDialog(account.id, account.name)
     if (act === 'del') {
       if (!confirm2(m, account)) return
@@ -912,7 +950,8 @@ async function renderInitStatus () {
     if (!s.total) { el.className = 'init-status bad'; el.textContent = 'Status: belum ada akun WA yang kebuka — buka akun dulu'; return }
     if (s.armed > 0) {
       el.className = 'init-status good'
-      el.textContent = `✅ Aktif di ${s.armed}/${s.total} akun — tag "${s.code}" bakal nempel di baris bawah tiap lu kirim`
+      const skip = s.personalSkipped > 0 ? ` (${s.personalSkipped} akun pribadi di-skip)` : ''
+      el.textContent = `✅ Aktif di ${s.armed}/${s.total} akun${skip} — tag "${s.code}" bakal nempel di baris bawah tiap lu kirim`
     } else {
       el.className = 'init-status bad'
       el.textContent = '⚠️ ' + (s.reason || 'engine belum nyala') + ' — coba tutup & buka lagi akunnya'
@@ -1012,6 +1051,98 @@ $('btnInstallUpdate')?.addEventListener('click', async () => {
   await window.waMulti.updateInstall()
 })
 window.waMulti.onUpdateStatus((p) => { updState = p || {}; renderUpdStatus() })
+
+// ── v2.7.0 Server panel ───────────────────────────────────────
+let serverBusy = false
+
+async function renderServer () {
+  try {
+    const st = state.server || {}
+    const lic = state.license || {}
+    const cfgBox = $('serverCfgInfo')
+    if (cfgBox) {
+      cfgBox.innerHTML = st.configured
+        ? `Terhubung ke <code>${esc(st.url || '')}</code>${lic.canUseServer === false ? ' <span class="warn">(paket lu gak termasuk fitur Server)</span>' : ''}`
+        : 'Belum dikonfigurasi. Isi alamat server di bawah.'
+    }
+    // status
+    const box = $('serverStatusBox')
+    if (box) {
+      if (!st.configured) box.innerHTML = 'Server belum dikonfigurasi.'
+      else if (!st.live) box.innerHTML = 'Menghubungi server...'
+      else if (!st.live.reachable) box.innerHTML = '⚠️ Server gak nyambung.'
+      else if (!st.live.authed) box.innerHTML = '⚠️ Server nyambung, tapi akun WA belum login di sana.'
+      else box.innerHTML = `✅ Server nyambung — akun <b>${esc(st.live.account || '?')}</b> login.<br>` +
+        `Terkirim hari ini: <b>${st.live.sentToday || 0}</b>/${st.live.cap || 0} · ` +
+        (st.live.job ? `Blast jalan: ${st.live.job.sent}/${st.live.job.total}` : 'Gak ada blast jalan.')
+    }
+    renderServerAccounts()
+    renderServerHistory()
+  } catch (_) {}
+}
+
+function renderServerAccounts () {
+  const list = $('serverAccList')
+  if (!list) return
+  const st = state.server || {}
+  if (!st.configured) { list.innerHTML = '<div class="sub small">Konfigurasi server dulu buat lihat akun.</div>'; return }
+  if (!state.accounts.length) { list.innerHTML = '<div class="sub small">Belum ada akun.</div>'; return }
+  list.innerHTML = ''
+  for (const a of state.accounts) {
+    const isServer = !!a.onServer
+    const row = document.createElement('div')
+    row.className = 'acc-row'
+    row.innerHTML = `
+      <span class="tdot" style="background:${a.color || 'var(--accent)'}"></span>
+      <span class="mn">${esc(a.name)}</span>
+      <span class="sub small">${isServer ? '🌐 di server' : 'di laptop'}</span>
+      <span class="btn-row">
+        ${isServer
+          ? `<button type="button" class="ghost-btn srv-pull" data-id="${esc(a.id)}">⬇️ Tarik balik</button>`
+          : `<button type="button" class="ghost-btn srv-migrate" data-id="${esc(a.id)}">⬆️ Kirim ke server</button>`}
+      </span>`
+    list.appendChild(row)
+  }
+  // wire buttons
+  list.querySelectorAll('.srv-migrate').forEach(b => b.addEventListener('click', async () => {
+    if (serverBusy) return toast('Tunggu proses sebelumnya selesai.')
+    serverBusy = true; b.disabled = true; b.textContent = 'Mengirim...'
+    const r = await window.waMulti.serverMigrate(b.dataset.id)
+    serverBusy = false
+    if (r && r.ok) toast(`✅ ${state.accounts.find(x => x.id === b.dataset.id)?.name || ''} terkirim ke server (${(r.size / 1048576).toFixed(1)} MB)`)
+    else toast('⚠️ ' + ((r && r.error) || 'gagal kirim ke server'))
+    refreshState()
+  }))
+  list.querySelectorAll('.srv-pull').forEach(b => b.addEventListener('click', async () => {
+    if (serverBusy) return toast('Tunggu proses sebelumnya selesai.')
+    serverBusy = true; b.disabled = true; b.textContent = 'Menarik...'
+    const r = await window.waMulti.serverPull(b.dataset.id)
+    serverBusy = false
+    if (r && r.ok) toast(`✅ Sesi ${state.accounts.find(x => x.id === b.dataset.id)?.name || ''} balik ke laptop (${(r.size / 1048576).toFixed(1)} MB)`)
+    else toast('⚠️ ' + ((r && r.error) || 'gagal tarik balik'))
+    refreshState()
+  }))
+}
+
+function renderServerHistory () {
+  const hist = $('serverHist')
+  if (!hist) return
+  const st = state.server || {}
+  const h = (st.live && st.live.history) || []
+  if (!h.length) { hist.innerHTML = 'Belum ada aktivitas.'; return }
+  hist.innerHTML = h.slice(0, 8).map(x =>
+    `<div class="sub small">${new Date(x.ts).toLocaleTimeString('id-ID')} — ${x.status === 'sent' ? '✅' : '❌'} ${esc(x.name || x.jid || '')}${x.error ? ' <span class="warn">' + esc(String(x.error).slice(0, 60)) + '</span>' : ''}</div>`
+  ).join('')
+}
+
+$('serverSaveCfg')?.addEventListener('click', async () => {
+  const url = ($('serverUrl')?.value || '').trim()
+  if (!url) return toast('Isi alamat server dulu.')
+  const r = await window.waMulti.serverSetConfig({ url })
+  if (r && r.ok) toast('✅ Konfigurasi server disimpan')
+  else toast('⚠️ ' + ((r && r.error) || 'gagal simpan'))
+  refreshState()
+})
 
 // ── boot ──────────────────────────────────────────────────────
 async function boot () {

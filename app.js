@@ -147,6 +147,7 @@ async function refreshState () {
   renderTargetSummary()
   syncStage()
   renderSettings()          // v2.6.0 — reflect initials + version in the settings dialog
+  const bv = $('brandVer'); if (bv) bv.textContent = 'v' + (state.appVersion || '?')
   renderServer()            // v2.7.0 — server panel + badge state
 }
 
@@ -224,7 +225,13 @@ function openCtxMenu (x, y, account) {
   const personalLabel = account.personal
     ? '🏠 Lepas pribadi — tag inisial aktif lagi'
     : '🏠 Tandai pribadi — tanpa tag inisial'
+  // v2.7.0 — handoff sesi ke server bisa langsung dari klik-kanan tab akun
+  const srvOn = !!account.onServer
+  const srvLabel = srvOn
+    ? '⬇️ Tarik balik dari server'
+    : '🌐 Kirim ke server (always-on)'
   m.innerHTML = `
+    <div class="acc-item" data-act="srv">${srvLabel}</div>
     <div class="acc-item${!account.isPinned && !account.isPin2 && !canPinMore ? ' disabled' : ''}" data-act="pin">${pinLabel}</div>
     ${account.slot && !account.isPinned && !account.isPin2 ? '<div class="acc-item" data-act="park">💤 Parkir tab ini</div>' : ''}
     <div class="acc-item" data-act="personal">${personalLabel}</div>
@@ -234,6 +241,22 @@ function openCtxMenu (x, y, account) {
     const act = e.target.closest('[data-act]')?.dataset.act
     if (!act) return
     closeCtxMenu()
+    if (act === 'srv') {
+      if (srvOn) {
+        toast('Narik sesi dari server...')
+        const r = await window.waMulti.serverPull(account.id)
+        if (r && r.ok) toast(`✅ ${account.name} balik ke laptop`)
+        else toast('❌ Gagal tarik: ' + ((r && r.error) || '?'))
+      } else {
+        if (!confirm(`Kirim sesi "${account.name}" ke server?\n\nSesinya bakal jalan 24/7 di server (laptop boleh mati).`)) return
+        toast('Ngirim sesi ke server... jangan tutup app.')
+        const r = await window.waMulti.serverMigrate(account.id)
+        if (r && r.ok) toast(`✅ ${account.name} jalan di server (${(r.size / 1048576).toFixed(1)} MB)`)
+        else toast('❌ Gagal kirim: ' + ((r && r.error) || '?'))
+      }
+      refreshState()
+      return
+    }
     if (act === 'pin') {
       if (!account.isPinned && !account.isPin2 && state.accounts.filter(x => x.isPinned || x.isPin2).length >= 2) {
         toast('maksimal 2 pin — lepas salah satu dulu')
