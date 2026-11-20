@@ -893,6 +893,19 @@ function withTimeout (p, ms, errMsg) {
   ])
 }
 
+// v2.7.4 — error engine-internal (WA Web berubah, bundle wa-js ketinggalan) bikin user
+// bingung: "... is not a function" / "Cannot read properties of undefined (reading 'x')".
+// Terjemahin jadi instruksi yang jelas, tapi detail aslinya TETEP disimpen buat diagnosa.
+function friendlySendError (raw) {
+  const s = String(raw || '')
+  if (/is not a function|is not a constructor/.test(s) ||
+      /Cannot read propert(y|ies) of (undefined|null)|undefined is not an object/.test(s) ||
+      /prepRawMedia/.test(s)) {
+    return `engine perlu update — WhatsApp Web berubah, engine lama gak nyambung. Update app di ⚙️ → Cek update. detail: ${s.slice(0, 140)}`
+  }
+  return s.slice(0, 200)
+}
+
 async function sendText (view, jid, text) {
   const res = await withTimeout(view.webContents.executeJavaScript(`(async () => {
     try {
@@ -900,6 +913,7 @@ async function sendText (view, jid, text) {
       return { ok: true }
     } catch (e) { return { ok: false, error: String(e && e.message || e).slice(0,200) } }
   })()`).catch(e => ({ ok: false, error: String(e).slice(0, 200) })), SEND_TIMEOUT_MS, 'timeout: WA gak selesai kirim dalam 60 dtk')
+  if (res && !res.ok && res.error) res.error = friendlySendError(res.error)
   return res || { ok: false, error: 'unknown' }
 }
 
@@ -907,11 +921,12 @@ async function sendFile (view, jid, file, caption) {
   const res = await withTimeout(view.webContents.executeJavaScript(`(async () => {
     try {
       const opts = { createChat: true, waitForAck: false, type: 'auto-detect', filename: ${JSON.stringify(file.filename || 'file')} }
-      if (${JSON.stringify(caption || '')}) opts.caption = ${JSON.stringify(caption || '')}
+      if (${JSON.stringify(caption || '')}) opts.caption = ${JSON.stringify(caption)}
       await window.WPP.chat.sendFileMessage(${JSON.stringify(jid)}, ${JSON.stringify(file.dataUrl)}, opts)
       return { ok: true }
     } catch (e) { return { ok: false, error: String(e && e.message || e).slice(0,200) } }
   })()`).catch(e => ({ ok: false, error: String(e).slice(0, 200) })), Math.max(SEND_TIMEOUT_MS, 120000), 'timeout: upload gak selesai dalam 120 dtk')
+  if (res && !res.ok && res.error) res.error = friendlySendError(res.error)
   return res || { ok: false, error: 'unknown' }
 }
 
@@ -2269,21 +2284,27 @@ function runSelfTest () {
 
       // 15. engine bundle vendored + injectable API names present
       check('wa-js bundle vendored', WAJS_BUNDLE.length > 100000, `bytes=${WAJS_BUNDLE.length}`)
-      // v2.7.3 — REGRESI PENTING: bundle wa-js ketinggalan = blast mati total.
-      // WhatsApp mindahin `prepRawMedia` (changelog wa-js 4.7.1, #3732) → bundle 4.6.0
-      // ngelempar "Cannot read properties of undefined (reading 'prepRawMedia')" di
-      // SETIAP blast. Adam kena 2 laptop sekaligus. Assert versi bundle >= 4.7.1.
+      // v2.7.4 — REGRESI PENTING (2x kejadian): bundle wa-js ketinggalan = blast mati total.
+      // (a) WA mindahin `prepRawMedia` → bundle 4.6.0 jebol (fix di 4.7.1+)
+      // (b) WA NGEBUANG `UserPrefs.getMeLidUserOrThrow` → bundle <=4.8.1 ngelempar
+      //     "n.UserPrefs.getMeLidUserOrThrow is not a function" di TIAP blast (fix di 4.8.2, #3796)
+      // Ambang wajib: >= 4.8.2 + fallback `getMaybeMeLidUser` harus ada.
       {
         const m = WAJS_BUNDLE.match(/wa-js v([0-9]+)\.([0-9]+)\.([0-9]+)/)
         const ver = m ? `${m[1]}.${m[2]}.${m[3]}` : 'unknown'
         const maj = m ? parseInt(m[1], 10) : 0
         const min = m ? parseInt(m[2], 10) : 0
         const pat = m ? parseInt(m[3], 10) : 0
-        const okVer = maj > 4 || (maj === 4 && (min > 7 || (min === 7 && pat >= 1)))
-        check('wa-js bundle >= 4.7.1 (prepRawMedia moved)', okVer, `bundle=${ver}`)
+        const okVer = maj > 4 || (maj === 4 && (min > 8 || (min === 8 && pat >= 2)))
+        check('wa-js bundle >= 4.8.2 (LID getter fallback)', okVer, `bundle=${ver}`)
+        check('wa-js bundle punya fallback getMaybeMeLidUser', /getMaybeMeLidUser/.test(WAJS_BUNDLE))
         check('wa-js bundle splits MediaPrep bindings', /prepRawMedia/.test(WAJS_BUNDLE), `hits=${(WAJS_BUNDLE.match(/prepRawMedia/g) || []).length}`)
       }
       check('engine exposes sendTextMessage', /sendTextMessage/.test(WAJS_BUNDLE))
+      // v2.7.4 — penerjemah error engine: user gak boleh lihat "... is not a function" mentah
+      check('err engine (LID getter) → pesan kebaca', /engine perlu update/.test(friendlySendError('n.UserPrefs.getMeLidUserOrThrow is not a function')))
+      check('err engine (prepRawMedia) → pesan kebaca', /engine perlu update/.test(friendlySendError("Cannot read properties of undefined (reading 'prepRawMedia')")))
+      check('err biasa dibiarin apa adanya', friendlySendError('nomor tidak valid') === 'nomor tidak valid')
       check('engine exposes getAllGroups', /getAllGroups/.test(WAJS_BUNDLE))
       check('engine exposes getGroupInfoFromInviteCode', /getGroupInfoFromInviteCode/.test(WAJS_BUNDLE))
 
